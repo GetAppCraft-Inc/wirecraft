@@ -76,7 +76,7 @@ pub struct TrustEntry {
     pub detail: String,
 }
 
-const NSS_NICK: &str = "xwire Root CA";
+const NSS_NICK: &str = "WireCraft Root CA";
 
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
@@ -154,7 +154,7 @@ pub fn trust_status(cert_path: &str, common_name: &str) -> Vec<TrustEntry> {
         });
     }
     v.push(TrustEntry { id: "java", name: "Java (cacerts)".into(), state: "optional", detail: "Optional".into() });
-    let node_ok = std::env::var("NODE_EXTRA_CA_CERTS").map(|p| p == cert_path || p.ends_with("xwire-root.pem")).unwrap_or(false);
+    let node_ok = std::env::var("NODE_EXTRA_CA_CERTS").map(|p| p == cert_path || p.ends_with("wirecraft-root.pem")).unwrap_or(false);
     v.push(TrustEntry {
         id: "node",
         name: "Node.js".into(),
@@ -166,13 +166,13 @@ pub fn trust_status(cert_path: &str, common_name: &str) -> Vec<TrustEntry> {
 
 /// The commands a user can paste to trust the CA themselves, per platform/distro.
 pub fn manual_commands(dir: &str) -> serde_json::Value {
-    let pem = format!("{dir}/xwire-root.pem");
-    let crt = format!("{dir}/xwire-root.crt");
+    let pem = format!("{dir}/wirecraft-root.pem");
+    let crt = format!("{dir}/wirecraft-root.crt");
     serde_json::json!({
         "arch": [format!("sudo trust anchor --store {crt}")],
-        "debian": [format!("sudo cp {crt} /usr/local/share/ca-certificates/xwire-root.crt && sudo update-ca-certificates")],
-        "fedora": [format!("sudo cp {pem} /etc/pki/ca-trust/source/anchors/xwire-root.pem && sudo update-ca-trust")],
-        "opensuse": [format!("sudo cp {pem} /etc/pki/trust/anchors/xwire-root.pem && sudo update-ca-certificates")],
+        "debian": [format!("sudo cp {crt} /usr/local/share/ca-certificates/wirecraft-root.crt && sudo update-ca-certificates")],
+        "fedora": [format!("sudo cp {pem} /etc/pki/ca-trust/source/anchors/wirecraft-root.pem && sudo update-ca-trust")],
+        "opensuse": [format!("sudo cp {pem} /etc/pki/trust/anchors/wirecraft-root.pem && sudo update-ca-certificates")],
         "macos": [format!("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {pem}")],
         "windows": [format!("certutil -user -addstore Root \"{crt}\"")],
         "firefox": [format!("certutil -A -d sql:$HOME/.mozilla/firefox/<profile> -t \"C,,\" -n \"{NSS_NICK}\" -i {pem}")],
@@ -183,14 +183,14 @@ pub fn manual_commands(dir: &str) -> serde_json::Value {
 
 /// Add the CA to the OS trust store. Asks for admin rights through the platform's prompt.
 pub fn install_system(dir: &str) -> Result<String, String> {
-    let pem = format!("{dir}/xwire-root.pem");
-    let crt = format!("{dir}/xwire-root.crt");
+    let pem = format!("{dir}/wirecraft-root.pem");
+    let crt = format!("{dir}/wirecraft-root.crt");
     let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "linux") {
         let fam = os_info().family;
         let script = match fam.as_str() {
-            "debian" => format!("cp '{crt}' /usr/local/share/ca-certificates/xwire-root.crt && update-ca-certificates"),
-            "fedora" => format!("cp '{pem}' /etc/pki/ca-trust/source/anchors/xwire-root.pem && update-ca-trust"),
-            "opensuse" => format!("cp '{pem}' /etc/pki/trust/anchors/xwire-root.pem && update-ca-certificates"),
+            "debian" => format!("cp '{crt}' /usr/local/share/ca-certificates/wirecraft-root.crt && update-ca-certificates"),
+            "fedora" => format!("cp '{pem}' /etc/pki/ca-trust/source/anchors/wirecraft-root.pem && update-ca-trust"),
+            "opensuse" => format!("cp '{pem}' /etc/pki/trust/anchors/wirecraft-root.pem && update-ca-certificates"),
             _ => format!("trust anchor --store '{crt}'"),
         };
         ("pkexec", vec!["sh".into(), "-c".into(), script])
@@ -215,7 +215,7 @@ pub fn install_nss(dir: &str, firefox: bool) -> Result<String, String> {
     if !has("certutil") {
         return Err("certutil not found: install your distribution's nss tools package (e.g. nss, libnss3-tools)".into());
     }
-    let pem = format!("{dir}/xwire-root.pem");
+    let pem = format!("{dir}/wirecraft-root.pem");
     let dbs: Vec<PathBuf> = if firefox {
         firefox_profiles()
     } else {
@@ -352,7 +352,7 @@ pub struct PortCheck {
 
 pub fn check_port(port: u16, ours: Option<u16>) -> PortCheck {
     if Some(port) == ours {
-        return PortCheck { port, free: true, owner: Some("xwire".into()) };
+        return PortCheck { port, free: true, owner: Some("wirecraft".into()) };
     }
     let free = std::net::TcpListener::bind(("0.0.0.0", port)).is_ok();
     let owner = if free {

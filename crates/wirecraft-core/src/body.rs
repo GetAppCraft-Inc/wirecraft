@@ -16,6 +16,8 @@ pub struct TeeDone {
     pub total: u64,
     pub elapsed_ms: f64,
     pub error: Option<String>,
+    /// HTTP/2 trailers (gRPC status lives here).
+    pub trailers: crate::store::Headers,
 }
 
 pin_project_lite::pin_project! {
@@ -24,8 +26,12 @@ pin_project_lite::pin_project! {
         #[pin]
         inner: B,
         buf: BytesMut,
+        trailers: crate::store::Headers,
         cap: usize,
         total: u64,
+        // Content-Length of the response, when known: a client that hangs up after receiving all of it
+        // (before the upstream's end-of-stream frame arrived) got the whole body.
+        expected: Option<u64>,
         truncated: bool,
         start: Instant,
         done: Option<Box<dyn FnOnce(TeeDone) + Send + 'static>>,
@@ -36,10 +42,11 @@ pin_project_lite::pin_project! {
             let this = this.project();
             // Empty bodies (Content-Length: 0, 204, 304, HEAD) report end-of-stream up front, so hyper never
             // polls them: finishing without being polled is only an error if data was still to come.
-            let ended = this.inner.is_end_stream();
+            let ended = this.inner.is_end_stream() || this.expected.is_some_and(|n| *this.total >= n);
             if let Some(done) = this.done.take() {
                 done(TeeDone {
                     captured: std::mem::take(this.buf).freeze(),
+                    trailers: std::mem::take(this.trailers),
                     truncated: *this.truncated,
                     total: *this.total,
                     elapsed_ms: this.start.elapsed().as_secs_f64() * 1000.0,
@@ -55,12 +62,22 @@ impl<B: Body> TeeBody<B> {
         Self {
             inner,
             buf: BytesMut::new(),
+            trailers: Vec::new(),
             cap,
             total: 0,
+            expected: None,
             truncated: false,
             start: Instant::now(),
             done: Some(Box::new(done)),
         }
+    }
+}
+
+impl<B: Body> TeeBody<B> {
+    /// The body's declared length (Content-Length), so an early hang-up after the last byte isn't an error.
+    pub fn expect_len(mut self, n: Option<u64>) -> Self {
+        self.expected = n;
+        self
     }
 }
 
@@ -88,17 +105,20 @@ where
                     }
                 }
                 // hyper stops polling once the body reports end-of-stream, so finish here too
-                if this.inner.is_end_stream() {
-                    if let Some(done) = this.done.take() {
+                if let Some(t) = frame.trailers_ref() {
+                    this.trailers.extend(t.iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())));
+                }
+                if this.inner.is_end_stream()
+                    && let Some(done) = this.done.take() {
                         done(TeeDone {
                             captured: std::mem::take(this.buf).freeze(),
+                            trailers: std::mem::take(this.trailers),
                             truncated: *this.truncated,
                             total: *this.total,
                             elapsed_ms: this.start.elapsed().as_secs_f64() * 1000.0,
                             error: None,
                         });
                     }
-                }
             }
             Poll::Ready(other) => {
                 let error = match other {
@@ -108,6 +128,7 @@ where
                 if let Some(done) = this.done.take() {
                     done(TeeDone {
                         captured: std::mem::take(this.buf).freeze(),
+                        trailers: std::mem::take(this.trailers),
                         truncated: *this.truncated,
                         total: *this.total,
                         elapsed_ms: this.start.elapsed().as_secs_f64() * 1000.0,
@@ -210,5 +231,36 @@ pub fn classify(method: &str, path: &str, req_ct: Option<&str>, resp_ct: Option<
         "json" => "JSON",
         _ if ct.is_empty() => "—",
         _ => "Bin",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use http_body_util::{BodyExt, StreamBody};
+    use std::sync::{Arc, Mutex};
+
+    /// All the data arrives but the end-of-stream never does (HTTP/2 sends it as a separate frame), then the
+    /// client hangs up.
+    async fn hang_up_after_data(expected: Option<u64>) -> Option<String> {
+        let frames = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"hello")))])
+            .chain(futures_util::stream::pending());
+        let got = Arc::new(Mutex::new(None));
+        let g = got.clone();
+        let mut tee = TeeBody::new(StreamBody::new(frames), 1024, move |d| *g.lock().unwrap() = Some(d)).expect_len(expected);
+        let first = tee.frame().await.unwrap().unwrap();
+        assert_eq!(first.into_data().unwrap(), "hello");
+        drop(tee);
+        let d = got.lock().unwrap().take().expect("done called");
+        assert_eq!((d.total, &d.captured[..]), (5, &b"hello"[..]));
+        d.error
+    }
+
+    #[tokio::test]
+    async fn early_hang_up_after_full_body_is_not_an_error() {
+        assert_eq!(hang_up_after_data(Some(5)).await, None);
+        assert!(hang_up_after_data(Some(6)).await.is_some());
+        assert!(hang_up_after_data(None).await.is_some());
     }
 }

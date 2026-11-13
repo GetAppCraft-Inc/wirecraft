@@ -6,6 +6,7 @@
 //! - `stats`  — `Stats`, once a second
 //! - `proxy`  — `ProxyStatus`, whenever the proxy (re)starts or fails to
 
+mod charles;
 mod har;
 mod settings;
 mod system;
@@ -21,8 +22,8 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
-use xwire_core::store::{Headers, Timing, TlsInfo};
-use xwire_core::{CaInfo, CertAuthority, FlowSummary, InterceptConfig, Proxy, ProxyOptions, Store, StoreEvent};
+use wirecraft_core::store::{Headers, Timing, TlsInfo};
+use wirecraft_core::{CaInfo, CertAuthority, FlowSummary, InterceptConfig, Proxy, ProxyOptions, Store, StoreEvent};
 
 use settings::Settings;
 
@@ -36,10 +37,10 @@ pub struct App {
     proxy: RwLock<Option<Arc<Proxy>>>,
     proxy_error: RwLock<Option<String>>,
     settings: RwLock<Settings>,
-    /// True when xwire turned the system proxy on, so it gets switched off again on quit.
+    /// True when WireCraft turned the system proxy on, so it gets switched off again on quit.
     set_system_proxy: AtomicBool,
-    rules: xwire_core::rules::SharedRules,
-    breaks: Arc<xwire_core::Breaks>,
+    rules: wirecraft_core::rules::SharedRules,
+    breaks: Arc<wirecraft_core::Breaks>,
 }
 
 type R<T> = Result<T, String>;
@@ -238,10 +239,13 @@ struct BodyView {
     /// Only the first DISPLAY_CAP bytes are included here.
     clipped: bool,
     decode_error: Option<String>,
+    /// Schemaless decode of gRPC / gRPC-Web / protobuf bodies (see `wirecraft_core::grpc`).
+    grpc: Option<serde_json::Value>,
 }
 
 fn body_view(raw: &[u8], headers: &Headers, truncated: bool) -> BodyView {
-    let (decoded, decode_error) = xwire_core::proxy::decoded_body(raw, headers);
+    let hv = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+    let (decoded, decode_error) = wirecraft_core::proxy::decoded_body(raw, headers);
     let decoded_size = decoded.len();
     let clipped = decoded.len() > DISPLAY_CAP;
     let mut slice = &decoded[..decoded.len().min(DISPLAY_CAP)];
@@ -254,7 +258,8 @@ fn body_view(raw: &[u8], headers: &Headers, truncated: bool) -> BodyView {
         }
         Err(_) => (None, Some(base64::engine::general_purpose::STANDARD.encode(slice))),
     };
-    BodyView { size: raw.len(), decoded_size, text, base64, truncated, clipped, decode_error }
+    let grpc = hv("content-type").and_then(|ct| wirecraft_core::grpc::decode_body(&decoded, ct, hv("grpc-encoding")));
+    BodyView { size: raw.len(), decoded_size, text, base64, truncated, clipped, decode_error, grpc }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,6 +272,7 @@ struct FlowDetail {
     resp_http_version: Option<String>,
     resp_headers: Headers,
     resp_body: BodyView,
+    resp_trailers: Headers,
     timing: Timing,
     tls: Option<TlsInfo>,
 }
@@ -287,6 +293,7 @@ fn flow_detail(app: State<App>, id: u64) -> R<FlowDetail> {
             resp_http_version: f.resp_http_version.clone(),
             resp_headers: f.resp_headers.clone(),
             resp_body: body_view(&f.resp_body, &f.resp_headers, f.resp_body_truncated),
+            resp_trailers: f.resp_trailers.clone(),
             timing: f.timing.clone(),
             tls: f.tls.clone(),
         })
@@ -300,9 +307,9 @@ fn save_body(app: State<App>, id: u64, response: bool, path: String) -> R<()> {
         .store
         .with(id, |f| {
             if response {
-                xwire_core::proxy::decoded_body(&f.resp_body, &f.resp_headers).0
+                wirecraft_core::proxy::decoded_body(&f.resp_body, &f.resp_headers).0
             } else {
-                xwire_core::proxy::decoded_body(&f.req_body, &f.req_headers).0
+                wirecraft_core::proxy::decoded_body(&f.req_body, &f.req_headers).0
             }
         })
         .ok_or_else(|| format!("Flow {id} no longer exists"))?;
@@ -325,11 +332,11 @@ async fn search_bodies(app: State<'_, App>, needle: String) -> R<Vec<u64>> {
             .filter(|id| {
                 store
                     .with(*id, |f| {
-                        let (rq, _) = xwire_core::proxy::decoded_body(&f.req_body, &f.req_headers);
+                        let (rq, _) = wirecraft_core::proxy::decoded_body(&f.req_body, &f.req_headers);
                         if hit(&rq) {
                             return true;
                         }
-                        let (rs, _) = xwire_core::proxy::decoded_body(&f.resp_body, &f.resp_headers);
+                        let (rs, _) = wirecraft_core::proxy::decoded_body(&f.resp_body, &f.resp_headers);
                         hit(&rs)
                     })
                     .unwrap_or(false)
@@ -364,18 +371,18 @@ fn replay(app: State<App>, id: u64) -> R<u64> {
 /// Compose / edit-and-repeat: send a new request through the proxy (rules apply).
 #[tauri::command]
 fn send_request(app: State<App>, method: String, url: String, headers: Headers, body: String) -> R<u64> {
-    app.current_proxy()?.send(&method, &url, &headers, body.into_bytes().into(), "xwire · compose").map_err(err)
+    app.current_proxy()?.send(&method, &url, &headers, body.into_bytes().into(), "WireCraft · compose").map_err(err)
 }
 
 // ---------------------------------------------------------------- rules & breakpoints
 
 #[tauri::command]
-fn get_rules(app: State<App>) -> xwire_core::Rules {
+fn get_rules(app: State<App>) -> wirecraft_core::Rules {
     (**app.rules.read()).clone()
 }
 
 #[tauri::command]
-fn set_rules(app: State<App>, rules: xwire_core::Rules) {
+fn set_rules(app: State<App>, rules: wirecraft_core::Rules) {
     *app.rules.write() = Arc::new(rules.clone());
     let mut s = app.settings.write();
     s.rules = rules;
@@ -383,12 +390,12 @@ fn set_rules(app: State<App>, rules: xwire_core::Rules) {
 }
 
 #[tauri::command]
-fn paused(app: State<App>) -> Vec<xwire_core::Paused> {
+fn paused(app: State<App>) -> Vec<wirecraft_core::Paused> {
     app.breaks.list()
 }
 
 #[tauri::command]
-fn resume(app: State<App>, id: u64, resume: xwire_core::Resume) -> bool {
+fn resume(app: State<App>, id: u64, resume: wirecraft_core::Resume) -> bool {
     app.breaks.resume(id, resume)
 }
 
@@ -398,7 +405,7 @@ fn resume_all(app: State<App>) {
 }
 
 #[tauri::command]
-fn ws_messages(app: State<App>, id: u64) -> R<Vec<xwire_core::WsMessage>> {
+fn ws_messages(app: State<App>, id: u64) -> R<Vec<wirecraft_core::WsMessage>> {
     app.store.with(id, |f| f.ws.clone()).ok_or_else(|| format!("Flow {id} no longer exists"))
 }
 
@@ -409,14 +416,48 @@ async fn import_har(app: State<'_, App>, path: String) -> R<usize> {
     let store = app.store.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let text = std::fs::read_to_string(&path).map_err(err)?;
-        har::import(&store, &text, &path)
+        let doc: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| {
+            if path.to_ascii_lowercase().ends_with(".chls") {
+                "Binary .chls sessions can't be read; in Charles use File → Export Session… and pick JSON or HAR".to_string()
+            } else {
+                format!("Not a HAR or Charles JSON file: {e}")
+            }
+        })?;
+        if charles::looks_like(&doc) {
+            charles::import(&store, &doc, &path)
+        } else {
+            har::import(&store, &text, &path)
+        }
     })
     .await
     .map_err(err)?
 }
 
+// ---------------------------------------------------------------- scripts
+
+#[tauri::command]
+fn script_logs(after: u64) -> Vec<wirecraft_core::scripts::LogLine> {
+    wirecraft_core::scripts::logs(after)
+}
+
+#[tauri::command]
+fn clear_script_logs() {
+    wirecraft_core::scripts::clear_logs();
+}
+
+/// Compile-check a script; returns the handlers it defines.
+#[tauri::command]
+async fn check_script(code: String) -> R<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || wirecraft_core::scripts::check(&code)).await.map_err(err)?
+}
+
+#[tauri::command]
+fn reset_script_state(id: Option<String>) {
+    wirecraft_core::scripts::reset_state(id.as_deref());
+}
+
 fn sessions_dir() -> std::path::PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("xwire").join("sessions")
+    wirecraft_core::paths::data_dir().join("sessions")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -610,22 +651,22 @@ fn export_ca(app: State<App>, format: String, path: String) -> R<()> {
     .map_err(err)
 }
 
-/// Fetch https://xwire.check through the proxy with curl, which uses the system trust store.
+/// Fetch https://wirecraft.check through the proxy with curl, which uses the system trust store.
 #[tauri::command]
 async fn verify_interception(app: State<'_, App>) -> R<String> {
     let addr = app.current_proxy()?.local_addr();
     let proxy = format!("http://127.0.0.1:{}", addr.port());
     tauri::async_runtime::spawn_blocking(move || {
         let out = std::process::Command::new("curl")
-            .args(["-sS", "--max-time", "8", "-o", "/dev/null", "-w", "%{http_code}", "-x", &proxy, "https://xwire.check"])
+            .args(["-sS", "--max-time", "8", "-o", "/dev/null", "-w", "%{http_code}", "-x", &proxy, "https://wirecraft.check"])
             .output()
             .map_err(|e| format!("curl not available: {e}"))?;
         let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if out.status.success() && code == "200" {
-            Ok("curl https://xwire.check returned 200 through the proxy".to_string())
+            Ok("curl https://wirecraft.check returned 200 through the proxy".to_string())
         } else {
             let e = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Err(if e.is_empty() { format!("xwire.check returned {code}") } else { e })
+            Err(if e.is_empty() { format!("wirecraft.check returned {code}") } else { e })
         }
     })
     .await
@@ -679,11 +720,11 @@ async fn set_system_proxy(app: State<'_, App>, on: bool) -> R<system::SystemProx
 
 pub fn run() {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,xwire_core=info".into()))
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,wirecraft_core=info".into()))
         .init();
 
     let settings = Settings::load();
-    let ca_dir = std::env::var("XWIRE_CA_DIR").map(Into::into).unwrap_or_else(|_| xwire_core::ca::default_ca_dir());
+    let ca_dir = std::env::var("WIRECRAFT_CA_DIR").map(Into::into).unwrap_or_else(|_| wirecraft_core::ca::default_ca_dir());
     let ca = match CertAuthority::load_or_create(&ca_dir) {
         Ok(ca) => ca,
         Err(e) => {
@@ -706,7 +747,7 @@ pub fn run() {
             settings: RwLock::new(settings),
             set_system_proxy: AtomicBool::new(false),
             rules: Arc::new(RwLock::new(Arc::new(rules))),
-            breaks: Arc::new(xwire_core::Breaks::default()),
+            breaks: Arc::new(wirecraft_core::Breaks::default()),
         })
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -743,6 +784,10 @@ pub fn run() {
             resume_all,
             ws_messages,
             import_har,
+            script_logs,
+            clear_script_logs,
+            check_script,
+            reset_script_state,
             list_sessions,
             save_session,
             delete_session,
@@ -763,7 +808,7 @@ pub fn run() {
             set_system_proxy,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building xwire");
+        .expect("error while building WireCraft");
 
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {

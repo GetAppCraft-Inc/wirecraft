@@ -1,0 +1,13 @@
+# Sections for the notes GitHub generates on each release (labels on merged PRs).
+changelog:
+  exclude:
+    labels: [skip-changelog]
+  categories:
+    - title: New
+      labels: [feature, enhancement]
+    - title: Fixes
+      labels: [bug, fix]
+    - title: Release and build
+      labels: [ci, release, build]
+    - title: Everything else
+      labels: ["*"]

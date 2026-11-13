@@ -9,8 +9,8 @@
   let { onnext, onskip }: { onnext: () => void; onskip: () => void } = $props();
 
   const STEPS: [IconName, string, string, string][] = [
-    ["shield", "Install the xwire root certificate", "So HTTPS can be decrypted on this machine and your devices.", "2 min"],
-    ["plug", "Pick a port and turn on the system proxy", "xwire listens locally and restores your settings on quit.", "30 s"],
+    ["shield", "Install the WireCraft root certificate", "So HTTPS can be decrypted on this machine and your devices.", "2 min"],
+    ["plug", "Pick a port and turn on the system proxy", "WireCraft listens locally and restores your settings on quit.", "30 s"],
     ["phone", "Connect phones and simulators", "Optional. Scan a QR code — no cables or USB debugging.", "optional"],
   ];
 
@@ -29,7 +29,7 @@
     <span class="pill" style="background:var(--accent-soft);color:var(--accent-text);font-size:10.5px;align-self:flex-start">OPEN SOURCE · NATIVE RUST · MIT</span>
     <h1>See every request your apps make.</h1>
     <p class="lede">
-      xwire is a native HTTPS debugging proxy. Inspect and replay HTTP/1.1, HTTP/2 and WebSocket traffic from desktop apps, browsers and phones.
+      WireCraft is a native HTTPS debugging proxy. Inspect and replay HTTP/1.1, HTTP/2 and WebSocket traffic from desktop apps, browsers and phones.
     </p>
     <div class="steps">
       {#each STEPS as [ic, t, d, k]}
@@ -53,7 +53,7 @@
     <div class="flow">
       <div class="node"><Icon name="monitor" size={20} color="var(--text-secondary)" /><b>This computer</b><span class="mono">{app.info?.os.prettyName || "Desktop apps"}</span></div>
       <span class="wire"></span>
-      <div class="node on"><Logo size={22} wordmark={false} /><b>xwire</b><span class="mono">{addr}</span></div>
+      <div class="node on"><Logo size={22} wordmark={false} /><b>WireCraft</b><span class="mono">{addr}</span></div>
       <span class="wire"></span>
       <div class="node"><Icon name="globe" size={20} color="var(--text-secondary)" /><b>Internet</b><span class="mono">TLS 1.3 · h2</span></div>
     </div>
@@ -74,7 +74,7 @@
         </div>
       {/if}
     </div>
-    <div class="foot">Everything stays on this machine. xwire never uploads captured traffic.</div>
+    <div class="foot">Everything stays on this machine. WireCraft never uploads captured traffic.</div>
   </div>
 </div>
 

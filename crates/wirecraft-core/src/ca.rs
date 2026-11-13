@@ -19,8 +19,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 
-const CERT_FILE: &str = "xwire-root.pem";
-const KEY_FILE: &str = "xwire-root.key";
+const CERT_FILE: &str = "wirecraft-root.pem";
+const KEY_FILE: &str = "wirecraft-root.key";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +51,7 @@ impl std::fmt::Debug for CertAuthority {
 }
 
 pub fn default_ca_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("xwire").join("ca")
+    crate::paths::data_dir().join("ca")
 }
 
 fn hostname() -> String {
@@ -69,6 +69,12 @@ impl CertAuthority {
     pub fn load_or_create(dir: &Path) -> Result<Self> {
         let cert_path = dir.join(CERT_FILE);
         let key_path = dir.join(KEY_FILE);
+        // CAs made before the rename use xwire-root.* file names: keep using that CA under the new names
+        if !cert_path.exists() && dir.join("xwire-root.pem").exists() && dir.join("xwire-root.key").exists() {
+            for ext in ["pem", "key", "crt", "der"] {
+                let _ = std::fs::rename(dir.join(format!("xwire-root.{ext}")), dir.join(format!("wirecraft-root.{ext}")));
+            }
+        }
         if cert_path.exists() && key_path.exists() {
             let pem = std::fs::read_to_string(&cert_path)?;
             let key = KeyPair::from_pem(&std::fs::read_to_string(&key_path)?)?;
@@ -83,8 +89,8 @@ impl CertAuthority {
         let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let mut params = CertificateParams::default();
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, format!("xwire Root CA · {}", hostname()));
-        dn.push(DnType::OrganizationName, "xwire");
+        dn.push(DnType::CommonName, format!("WireCraft Root CA · {}", hostname()));
+        dn.push(DnType::OrganizationName, "WireCraft");
         dn.push(DnType::OrganizationalUnitName, "Generated on this machine — never shared");
         params.distinguished_name = dn;
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
@@ -96,8 +102,8 @@ impl CertAuthority {
         let cert = params.self_signed(&key)?;
         let pem = cert.pem();
         std::fs::write(dir.join(CERT_FILE), &pem)?;
-        std::fs::write(dir.join("xwire-root.crt"), &pem)?;
-        std::fs::write(dir.join("xwire-root.der"), cert.der().as_ref())?;
+        std::fs::write(dir.join("wirecraft-root.crt"), &pem)?;
+        std::fs::write(dir.join("wirecraft-root.der"), cert.der().as_ref())?;
         write_private(&dir.join(KEY_FILE), key.serialize_pem().as_bytes())?;
         Self::from_parts(dir, pem, key)
     }
@@ -110,7 +116,7 @@ impl CertAuthority {
             .iter_common_name()
             .next()
             .and_then(|c| c.as_str().ok())
-            .unwrap_or("xwire Root CA")
+            .unwrap_or("WireCraft Root CA")
             .to_string();
         let info = CaInfo {
             common_name: cn,
@@ -122,9 +128,9 @@ impl CertAuthority {
             cert_path: dir.join(CERT_FILE).display().to_string(),
         };
         // the .crt / .der copies may be missing for CAs from older builds
-        if !dir.join("xwire-root.der").exists() {
-            let _ = std::fs::write(dir.join("xwire-root.der"), der.as_ref());
-            let _ = std::fs::write(dir.join("xwire-root.crt"), &pem);
+        if !dir.join("wirecraft-root.der").exists() {
+            let _ = std::fs::write(dir.join("wirecraft-root.der"), der.as_ref());
+            let _ = std::fs::write(dir.join("wirecraft-root.crt"), &pem);
         }
         let issuer = Issuer::from_ca_cert_pem(&pem, key)?;
         let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
@@ -159,7 +165,7 @@ impl CertAuthority {
         params.subject_alt_names = vec![san];
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, host.clone());
-        dn.push(DnType::OrganizationName, "xwire");
+        dn.push(DnType::OrganizationName, "WireCraft");
         params.distinguished_name = dn;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];

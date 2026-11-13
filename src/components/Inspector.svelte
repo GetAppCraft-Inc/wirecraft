@@ -233,6 +233,10 @@
             <div class="none">{app.detailError ?? "Loading…"}</div>
           {:else if respTab === "headers"}
             {@render kv(d.respHeaders)}
+            {#if d.respTrailers?.length}
+              <div class="trl">Trailers</div>
+              {@render kv(d.respTrailers)}
+            {/if}
           {:else if respTab === "cookies"}
             {#if !respCookies.length}
               <div class="none">None</div>
@@ -255,7 +259,7 @@
             {@render timing(d)}
           {:else if respTab === "tls"}
             {#if d.tls}
-              {@render kv([["Protocol", d.tls.version ?? "—"], ["ALPN", d.tls.alpn ?? "—"], ["SNI", d.tls.sni ?? "—"], ["Cipher", d.tls.cipher ?? "—"], ["Decrypted", s.state === "tunnel" ? "No (tunnelled)" : "Yes — signed by the xwire root CA"]], 110)}
+              {@render kv([["Protocol", d.tls.version ?? "—"], ["ALPN", d.tls.alpn ?? "—"], ["SNI", d.tls.sni ?? "—"], ["Cipher", d.tls.cipher ?? "—"], ["Decrypted", s.state === "tunnel" ? "No (tunnelled)" : "Yes — signed by the WireCraft root CA"]], 110)}
             {:else}
               <div class="none">Plain HTTP — no TLS on this connection.</div>
             {/if}
@@ -509,5 +513,13 @@
     font-size: 12.5px;
     line-height: 1.5;
     color: var(--text-secondary);
+  }
+  .trl {
+    padding: 10px 12px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
   }
 </style>

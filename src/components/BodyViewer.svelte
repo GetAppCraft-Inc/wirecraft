@@ -7,11 +7,12 @@
   import { save } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
   import JsonTree from "./JsonTree.svelte";
+  import ProtobufView from "./ProtobufView.svelte";
   import { untrack } from "svelte";
 
   let { body, contentType, flowId, response }: { body: BodyView; contentType: string | null; flowId: number; response: boolean } = $props();
 
-  type Mode = "pretty" | "raw" | "tree" | "hex" | "preview";
+  type Mode = "pretty" | "raw" | "tree" | "hex" | "preview" | "proto";
   let mode = $state<Mode>("pretty");
   let wrap = $state(false);
   let searching = $state(false);
@@ -34,7 +35,7 @@
   const isImage = $derived(ct.startsWith("image/"));
   const isHtml = $derived(ct.includes("html"));
   const label = $derived(
-    json.ok ? "JSON" : isImage ? ct.replace("image/", "").toUpperCase().split(";")[0] : isHtml ? "HTML" : ct.includes("xml") ? "XML" : ct.includes("javascript") ? "JS" : ct.includes("css") ? "CSS" : ct.includes("x-www-form-urlencoded") ? "Form" : body.text != null ? "Text" : "Binary",
+    body.grpc ? (body.grpc.kind === "protobuf" ? "Protobuf" : "gRPC") : json.ok ? "JSON" : isImage ? ct.replace("image/", "").toUpperCase().split(";")[0] : isHtml ? "HTML" : ct.includes("xml") ? "XML" : ct.includes("javascript") ? "JS" : ct.includes("css") ? "CSS" : ct.includes("x-www-form-urlencoded") ? "Form" : body.text != null ? "Text" : "Binary",
   );
 
   // pick a sensible default whenever a different body is shown
@@ -42,7 +43,7 @@
     void flowId;
     untrack(() => {
       const img = isImage, html = isHtml, text = body.text != null;
-      mode = img ? "preview" : !text ? "hex" : mode === "hex" || (mode === "preview" && !html) ? "pretty" : mode;
+      mode = body.grpc ? "proto" : img ? "preview" : !text ? "hex" : mode === "hex" || (mode === "preview" && !html) ? "pretty" : mode;
       showAll = false;
     });
   });
@@ -129,7 +130,7 @@
 <div class="bv">
   <div class="bt">
     <div class="seg sm">
-      {#each [["pretty", "Pretty"], ["raw", "Raw"], ["tree", "Tree"], ["hex", "Hex"], ["preview", "Preview"]] as [k, l]}
+      {#each [...(body.grpc ? [["proto", "Protobuf"]] : []), ["pretty", "Pretty"], ["raw", "Raw"], ["tree", "Tree"], ["hex", "Hex"], ["preview", "Preview"]] as [k, l]}
         <button class:on={mode === k} disabled={(k === "tree" && !json.ok) || (k === "preview" && !isImage && !isHtml) || ((k === "pretty" || k === "raw") && body.text == null)}
           onclick={() => (mode = k as Mode)}>{l}</button>
       {/each}
@@ -162,6 +163,8 @@
   <div class="wrapbox">
     {#if body.decodedSize === 0}
       <div class="none">No body</div>
+    {:else if mode === "proto" && body.grpc}
+      <div class="code tree"><ProtobufView data={body.grpc} /></div>
     {:else if mode === "tree" && json.ok}
       <div class="code tree" role="tree"><JsonTree value={json.value} open /></div>
     {:else if mode === "hex"}

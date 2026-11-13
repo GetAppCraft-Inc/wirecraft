@@ -1,8 +1,8 @@
-//! Persisted user settings (`<config dir>/xwire/settings.json`).
+//! Persisted user settings (`<config dir>/wirecraft/settings.json`).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use xwire_core::{InterceptConfig, Rules};
+use wirecraft_core::{InterceptConfig, Rules};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -29,13 +29,13 @@ impl Default for Settings {
             system_proxy_bypass: "localhost, 127.0.0.1, ::1, *.local, 169.254/16".into(),
             theme: "dark".into(),
             favourites: vec![],
-            rules: Rules { map_local_on: true, map_remote_on: true, rewrite_on: true, breakpoints_on: true, ..Default::default() },
+            rules: Rules { map_local_on: true, map_remote_on: true, rewrite_on: true, breakpoints_on: true, scripts_on: true, ..Default::default() },
         }
     }
 }
 
 fn path() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("xwire").join("settings.json")
+    wirecraft_core::paths::config_dir().join("settings.json")
 }
 
 impl Settings {

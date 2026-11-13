@@ -72,7 +72,7 @@
 <svelte:window {onkeydown} oncontextmenu={(e) => { if (!(e.target as HTMLElement).closest(".selectable, input, textarea")) e.preventDefault(); }} />
 
 {#if fatal}
-  <div class="fatal"><b>xwire couldn't start</b><span class="mono">{fatal}</span></div>
+  <div class="fatal"><b>WireCraft couldn't start</b><span class="mono">{fatal}</span></div>
 {:else if !app.ready}
   <div class="fatal"></div>
 {:else if app.screen === "onboarding"}

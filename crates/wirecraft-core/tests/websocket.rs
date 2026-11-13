@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use xwire_core::{CertAuthority, FlowState, Proxy, ProxyOptions, Store};
+use wirecraft_core::{CertAuthority, FlowState, Proxy, ProxyOptions, Store};
 
 async fn read_head(s: &mut TcpStream) -> String {
     let mut buf = Vec::new();
@@ -73,7 +73,7 @@ async fn websocket_messages_are_captured() {
         }
     });
 
-    let dir = std::env::temp_dir().join(format!("xwire-ws-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("wirecraft-ws-test-{}", std::process::id()));
     let ca = Arc::new(CertAuthority::generate(&dir).unwrap());
     let store = Store::new(100);
     let proxy = Proxy::start(ca, store.clone(), ProxyOptions { listen: "127.0.0.1:0".parse().unwrap(), ..Default::default() }).await.unwrap();

@@ -1,9 +1,12 @@
 <script lang="ts">
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { tools, newBreakpoint, newMapLocal, newMapRemote, newRewrite, newId, matcher, THROTTLE_PRESETS, headersToText, textToHeaders, type Tool } from "../lib/tools.svelte";
+  import { tools, newBreakpoint, newMapLocal, newMapRemote, newRewrite, newScript, newId, matcher, THROTTLE_PRESETS, headersToText, textToHeaders, type Tool } from "../lib/tools.svelte";
   import type { Matcher, RewriteAction, RewriteTarget } from "../lib/api";
   import Icon from "./Icon.svelte";
   import Kbd from "./Kbd.svelte";
+  import ScriptConsole from "./ScriptConsole.svelte";
+  import { api, errMsg } from "../lib/api";
+  import { app } from "../lib/state.svelte";
   import type { IconName } from "../lib/icons";
 
   const TABS: [Tool, string, IconName][] = [
@@ -11,6 +14,7 @@
     ["mapLocal", "Map Local", "map"],
     ["mapRemote", "Map Remote", "remote"],
     ["rewrite", "Rewrite", "rewrite"],
+    ["scripts", "Scripts", "code"],
     ["block", "Block", "x"],
     ["throttle", "Throttle", "throttle"],
   ];
@@ -20,6 +24,7 @@
     mapRemote: "Send matching requests to a different server, e.g. production → localhost.",
     rewrite: "Change headers, query params, URLs, bodies or status codes on the fly.",
     block: "Refuse matching requests with 403 Forbidden.",
+    scripts: "Run JavaScript on matching requests and responses to change them, or answer them yourself.",
     throttle: "Simulate a slow network with added latency and limited bandwidth.",
   };
   const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"];
@@ -38,6 +43,7 @@
       case "mapLocal": return r.mapLocal;
       case "mapRemote": return r.mapRemote;
       case "rewrite": return r.rewrite;
+      case "scripts": return r.scripts;
       case "block": return r.block;
       default: return [];
     }
@@ -47,7 +53,7 @@
     // keep a valid selection when switching tabs or deleting
     if (!list.some((x) => x.id === selId)) selId = list[0]?.id ?? null;
   });
-  const masterKey = $derived(({ breakpoints: "breakpointsOn", mapLocal: "mapLocalOn", mapRemote: "mapRemoteOn", rewrite: "rewriteOn" } as Record<string, "breakpointsOn" | "mapLocalOn" | "mapRemoteOn" | "rewriteOn">)[tab]);
+  const masterKey = $derived(({ breakpoints: "breakpointsOn", mapLocal: "mapLocalOn", mapRemote: "mapRemoteOn", rewrite: "rewriteOn", scripts: "scriptsOn" } as Record<string, "breakpointsOn" | "mapLocalOn" | "mapRemoteOn" | "rewriteOn" | "scriptsOn">)[tab]);
 
   const sel = $derived(list.find((x) => x.id === selId) ?? null);
   const bp = $derived(tab === "breakpoints" ? r.breakpoints.find((x) => x.id === selId) : undefined);
@@ -55,6 +61,35 @@
   const mr = $derived(tab === "mapRemote" ? r.mapRemote.find((x) => x.id === selId) : undefined);
   const rw = $derived(tab === "rewrite" ? r.rewrite.find((x) => x.id === selId) : undefined);
   const bl = $derived(tab === "block" ? r.block.find((x) => x.id === selId) : undefined);
+  const sc = $derived(tab === "scripts" ? r.scripts.find((x) => x.id === selId) : undefined);
+
+  // ---- script syntax check (debounced while typing)
+  let check = $state<{ id: string; ok: boolean; text: string } | null>(null);
+  let checkTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleCheck(id: string, code: string, delay = 400) {
+    if (checkTimer) clearTimeout(checkTimer);
+    checkTimer = setTimeout(async () => {
+      try {
+        const fns = await api.checkScript(code);
+        check = { id, ok: fns.length > 0, text: fns.length ? `Defines ${fns.join(" and ")}` : "Defines neither onRequest nor onResponse — it will never run" };
+      } catch (e) {
+        check = { id, ok: false, text: errMsg(e) };
+      }
+    }, delay);
+  }
+  $effect(() => {
+    if (sc) scheduleCheck(sc.id, sc.code, 0);
+  });
+
+  function codeKeys(e: KeyboardEvent & { currentTarget: HTMLTextAreaElement }) {
+    if (e.key !== "Tab" || !sc) return;
+    e.preventDefault();
+    const ta = e.currentTarget;
+    const [a, b] = [ta.selectionStart, ta.selectionEnd];
+    sc.code = sc.code.slice(0, a) + "  " + sc.code.slice(b);
+    requestAnimationFrame(() => ta.setSelectionRange(a + 2, a + 2));
+    save();
+  }
 
   function add() {
     let id: string;
@@ -63,6 +98,7 @@
       case "mapLocal": { const x = newMapLocal(); r.mapLocal.push(x); id = x.id; r.mapLocalOn = true; break; }
       case "mapRemote": { const x = newMapRemote(); r.mapRemote.push(x); id = x.id; r.mapRemoteOn = true; break; }
       case "rewrite": { const x = newRewrite(); r.rewrite.push(x); id = x.id; r.rewriteOn = true; break; }
+      case "scripts": { const x = newScript(); r.scripts.push(x); id = x.id; r.scriptsOn = true; break; }
       case "block": { const x = { id: newId(), enabled: true, match: matcher() }; r.block.push(x); id = x.id; break; }
       default: return;
     }
@@ -76,6 +112,7 @@
       case "mapLocal": r.mapLocal = r.mapLocal.filter((x) => x.id !== id); break;
       case "mapRemote": r.mapRemote = r.mapRemote.filter((x) => x.id !== id); break;
       case "rewrite": r.rewrite = r.rewrite.filter((x) => x.id !== id); break;
+      case "scripts": r.scripts = r.scripts.filter((x) => x.id !== id); break;
       case "block": r.block = r.block.filter((x) => x.id !== id); break;
     }
     tools.save(true);
@@ -298,8 +335,27 @@
               {#if rw.target === "responseBody" || rw.target === "responseHeader" || rw.target === "status"}
                 <span class="hint">Response rules buffer the whole response (up to 32 MB) and remove compression so text edits apply.</span>
               {/if}
+            {:else if sc}
+              <div class="row" style="gap:16px;flex-wrap:wrap">
+                <label class="row" style="gap:6px"><input type="checkbox" bind:checked={sc.request} onchange={save} />Run <span class="mono">onRequest</span></label>
+                <label class="row" style="gap:6px"><input type="checkbox" bind:checked={sc.response} onchange={save} />Run <span class="mono">onResponse</span></label>
+                <label class="row" style="gap:6px;margin-left:auto">Timeout
+                  <span class="input" style="width:84px"><input class="mono" type="number" min="0" max="30000" step="100" value={sc.timeoutMs || ""} oninput={(e) => { sc.timeoutMs = Math.max(0, Math.round(Number(e.currentTarget.value) || 0)); save(); }} placeholder="1000" /></span>ms</label>
+              </div>
+              <div class="field grow code">
+                <span class="lbl row" style="gap:8px">
+                  Code
+                  {#if check && check.id === sc.id}
+                    <span class="chk" class:bad={!check.ok}><Icon name={check.ok ? "check" : "alert"} size={12} />{check.text}</span>
+                  {/if}
+                  <button class="btn sm ghost" style="margin-left:auto" title="Forget context.state for this script" onclick={() => api.resetScriptState(sc.id).then(() => app.toast({ kind: "info", title: "Script state cleared", body: "context.state starts empty on the next run." }))}>Reset state</button>
+                </span>
+                <textarea class="mono grow" bind:value={sc.code} oninput={() => { save(); scheduleCheck(sc.id, sc.code); }} onkeydown={codeKeys} spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+              </div>
+              <span class="hint">Sandboxed QuickJS: no network, files or timers; 64 MB memory. A script that throws or times out leaves the exchange unchanged and is flagged in the table. Response scripts buffer the body (≤ 32 MB) and remove compression.</span>
+              <ScriptConsole script={sc.name} />
             {:else if bl}
-              <span class="hint">Matching requests get <span class="mono">403 Forbidden</span> from xwire.</span>
+              <span class="hint">Matching requests get <span class="mono">403 Forbidden</span> from WireCraft.</span>
             {/if}
           {/if}
         </div>
@@ -404,6 +460,24 @@
   .field.grow {
     flex: 1;
     min-height: 140px;
+  }
+  .field.code {
+    min-height: 260px;
+  }
+  .field.code textarea {
+    tab-size: 2;
+    line-height: 1.5;
+  }
+  .chk {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 400;
+    font-size: 11.5px;
+    color: var(--success-default);
+  }
+  .chk.bad {
+    color: var(--error-default);
   }
   .lbl {
     font-size: 12px;

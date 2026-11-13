@@ -1,10 +1,10 @@
 // State for the traffic tools: rules (Map Local / Map Remote / Rewrite / Breakpoints / Block / Throttle),
 // paused exchanges, Compose and Diff.
-import { api, errMsg, type Breakpoint, type Headers, type MapLocal, type MapRemote, type Matcher, type Paused, type Rewrite, type Rules, type SessionFile, type FlowSummary } from "./api";
+import { api, errMsg, type Breakpoint, type Headers, type MapLocal, type MapRemote, type Matcher, type Paused, type Rewrite, type Rules, type Script, type SessionFile, type FlowSummary } from "./api";
 import { app } from "./state.svelte";
 import { url as flowUrl } from "./format";
 
-export type Tool = "breakpoints" | "mapLocal" | "mapRemote" | "rewrite" | "throttle" | "block";
+export type Tool = "breakpoints" | "mapLocal" | "mapRemote" | "rewrite" | "throttle" | "block" | "scripts";
 
 let seq = 0;
 export function newId(): string {
@@ -26,6 +26,30 @@ export function newRewrite(m = matcher()): Rewrite {
 }
 export function newBreakpoint(m = matcher()): Breakpoint {
   return { id: newId(), enabled: true, name: "", match: m, request: true, response: false };
+}
+
+export const SCRIPT_TEMPLATE = `// Runs for every request that matches this script.
+// request  — { method, url, scheme, host, port, path, query, headers, body }
+// response — { status, headers, body }
+// context  — { flowId, script, client, state }   (state persists between runs)
+// body is decoded text (or null for binary); header names are lower-case.
+
+function onRequest(context, request) {
+  // request.headers["x-wirecraft"] = "1";
+  // return { response: { status: 200, body: { mocked: true } } };
+  return request;
+}
+
+function onResponse(context, request, response) {
+  // const data = JSON.parse(response.body);
+  // data.patched = true;
+  // response.body = data; // objects are sent as JSON
+  return response;
+}
+`;
+
+export function newScript(m = matcher()): Script {
+  return { id: newId(), enabled: true, name: "", match: m, request: true, response: true, code: SCRIPT_TEMPLATE, timeoutMs: 0 };
 }
 
 export const THROTTLE_PRESETS: { name: string; latencyMs: number; downloadKbps: number; uploadKbps: number }[] = [
@@ -89,11 +113,13 @@ class Tools {
       mapRemote: r ? n(r.mapRemoteOn, r.mapRemote) : 0,
       rewrite: r ? n(r.rewriteOn, r.rewrite) : 0,
       block: r ? r.block.filter((b) => b.enabled).length : 0,
+      scripts: r ? n(r.scriptsOn, r.scripts ?? []) : 0,
     };
   });
 
   async init() {
     this.rules = await api.getRules();
+    this.rules.scripts ??= [];
     this.paused = await api.paused();
     this.refreshSessions();
     app.onFlows = (flows) => {
@@ -167,6 +193,16 @@ class Tools {
     this.rules.rewriteOn = true;
     this.save(true);
     this.open("rewrite", r.id);
+  }
+
+  addScript(f: FlowSummary) {
+    if (!this.rules) return;
+    const r = newScript(matcherFor(f, false));
+    r.name = f.host;
+    this.rules.scripts.push(r);
+    this.rules.scriptsOn = true;
+    this.save(true);
+    this.open("scripts", r.id);
   }
 
   blockHost(host: string) {

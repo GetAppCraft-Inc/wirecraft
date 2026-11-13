@@ -97,6 +97,7 @@ pub struct Flow {
     pub resp_headers: Headers,
     pub resp_body: Bytes,
     pub resp_body_truncated: bool,
+    pub resp_trailers: Headers,
     pub timing: Timing,
     pub tls: Option<TlsInfo>,
     /// WebSocket messages (capped), oldest first.

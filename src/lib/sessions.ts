@@ -1,11 +1,11 @@
-// HAR import and saved sessions (HAR files in xwire's data folder).
+// HAR import and saved sessions (HAR files in WireCraft's data folder).
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errMsg } from "./api";
 import { app } from "./state.svelte";
 import { tools } from "./tools.svelte";
 
 export async function importHar(path?: string) {
-  const p = path ?? (await open({ multiple: false, filters: [{ name: "HAR", extensions: ["har", "json"] }] }));
+  const p = path ?? (await open({ multiple: false, filters: [{ name: "HAR or Charles session", extensions: ["har", "json", "chlsj"] }] }));
   if (typeof p !== "string") return;
   try {
     const n = await api.importHar(p);

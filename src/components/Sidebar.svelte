@@ -36,7 +36,7 @@
   interface Child { key: string; count: number; tls: boolean }
   interface Group { key: string; count: number; children: Child[] }
 
-  const CLIENT_ICON: Record<string, IconName> = { curl: "terminal", wget: "terminal", httpie: "terminal", python: "terminal", node: "terminal", "xwire · repeat": "repeat" };
+  const CLIENT_ICON: Record<string, IconName> = { curl: "terminal", wget: "terminal", httpie: "terminal", python: "terminal", node: "terminal", "WireCraft · repeat": "repeat" };
 
   const groups = $derived.by((): Group[] => {
     void app.slowVersion;
@@ -102,7 +102,7 @@
   }
   function groupIcon(key: string): IconName {
     if (mode === "domain") return "globe";
-    if (mode === "device") return key === "This computer" ? "monitor" : key === "xwire" ? "repeat" : "phone";
+    if (mode === "device") return key === "This computer" ? "monitor" : key === "WireCraft" ? "repeat" : "phone";
     return CLIENT_ICON[key.toLowerCase()] ?? "app";
   }
   function isOpen(key: string, i: number) {
@@ -110,7 +110,7 @@
   }
 
   async function exportAll() {
-    const path = await save({ defaultPath: "xwire-session.har", filters: [{ name: "HAR", extensions: ["har"] }] });
+    const path = await save({ defaultPath: "wirecraft-session.har", filters: [{ name: "HAR", extensions: ["har"] }] });
     if (!path) return;
     try {
       const n = await api.exportHar(path);

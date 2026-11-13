@@ -83,7 +83,7 @@
   }
 
   async function download(ext: "pem" | "crt" | "der") {
-    const path = await save({ defaultPath: `xwire-root.${ext}`, filters: [{ name: "Certificate", extensions: [ext] }] });
+    const path = await save({ defaultPath: `wirecraft-root.${ext}`, filters: [{ name: "Certificate", extensions: [ext] }] });
     if (!path) return;
     try {
       await api.exportCa(ext === "der" ? "der" : "pem", path);
@@ -138,8 +138,8 @@
 <div class="wrap">
   <div class="hd">
     <div class="col">
-      <h2>Install the xwire root certificate</h2>
-      <p>xwire signs certificates on the fly with a CA only this machine holds. Trust it once per device.</p>
+      <h2>Install the WireCraft root certificate</h2>
+      <p>WireCraft signs certificates on the fly with a CA only this machine holds. Trust it once per device.</p>
     </div>
     <Stepper active={0} onstep={(i) => i === 1 && onnext()} />
   </div>
@@ -168,7 +168,7 @@
           {/if}
           <Step n={1} done={canAuto && sysTrusted}
             title={platform === "macOS" ? "Trust the certificate in the System keychain" : platform === "Windows" ? "Add the certificate to Trusted Root Certification Authorities" : "Add the certificate to the system trust store"}
-            body={!canAuto ? "Run the command below on that machine." : platform === "Linux" ? `Detected ${prettyOs}. xwire asks for your password with pkexec and runs the command below.` : platform === "macOS" ? "Asks for your password once. xwire adds the CA and sets “Always Trust”." : "Windows shows a security prompt — choose Yes."}>
+            body={!canAuto ? "Run the command below on that machine." : platform === "Linux" ? `Detected ${prettyOs}. WireCraft asks for your password with pkexec and runs the command below.` : platform === "macOS" ? "Asks for your password once. WireCraft adds the CA and sets “Always Trust”." : "Windows shows a security prompt — choose Yes."}>
             {#if canAuto}
               <div class="row" style="gap:8px">
                 {#if sysTrusted}
@@ -184,16 +184,16 @@
               </div>
             {/if}
           </Step>
-          <Step n={2} title="Or run it yourself" body="Same result, if you'd rather not grant xwire admin rights.">
+          <Step n={2} title="Or run it yourself" body="Same result, if you'd rather not grant WireCraft admin rights.">
             {#if manualFor?.length}<Shell cmds={manualFor} />{/if}
           </Step>
           {#if canAuto}
-            <Step n={3} done={verified?.ok} title="Verify" body={verified ? (verified.ok ? `Verified: ${verified.msg}.` : verified.msg) : "Fetches https://xwire.check through the proxy with curl, which uses the system trust store."}>
+            <Step n={3} done={verified?.ok} title="Verify" body={verified ? (verified.ok ? `Verified: ${verified.msg}.` : verified.msg) : "Fetches https://wirecraft.check through the proxy with curl, which uses the system trust store."}>
               <button class="btn sm secondary" disabled={busy === "verify"} onclick={verify}><Icon name="repeat" />{busy === "verify" ? "Checking…" : "Run check"}</button>
             </Step>
           {/if}
         {:else if platform === "Firefox"}
-          <Banner tone="info" title="Firefox keeps its own certificate store" body="xwire can import the CA into every Firefox profile's NSS database with certutil. Restart Firefox afterwards." />
+          <Banner tone="info" title="Firefox keeps its own certificate store" body="WireCraft can import the CA into every Firefox profile's NSS database with certutil. Restart Firefox afterwards." />
           <Step n={1} title="Import into each Firefox profile" body="Works for regular, Snap and LibreWolf profiles. Needs certutil (nss tools).">
             <button class="btn primary" disabled={busy === "ff" || os?.os !== "linux"} onclick={() => act("ff", () => api.installNss(true), "Added to Firefox")}><Icon name="check" />{busy === "ff" ? "Importing…" : "Import into Firefox profiles"}</button>
           </Step>
@@ -204,7 +204,7 @@
         {:else}
           {#if !lanListening}
             <div class="lanwarn">
-              <Banner tone="warning" title="xwire only listens on this computer" body="Phones can't reach it until it listens on all interfaces." />
+              <Banner tone="warning" title="WireCraft only listens on this computer" body="Phones can't reach it until it listens on all interfaces." />
               <button class="btn secondary" disabled={busy === "lan"} onclick={listenAll}><Icon name="wifi" />Listen on all interfaces</button>
             </div>
           {/if}
@@ -238,12 +238,12 @@
               {:else}
                 <Step n={1} title="Set the Wi-Fi proxy on your iPhone or iPad" body="Settings → Wi-Fi → ⓘ next to your network → Configure Proxy → Manual." />
                 <Step n={2} title="Scan the QR code to download the profile" body="Safari downloads the certificate and offers to install it as a profile → Allow." />
-                <Step n={3} title="Install the profile" body="Settings → General → VPN & Device Management → xwire Root CA → Install." />
-                <Step n={4} title="Turn on full trust" body="Settings → General → About → Certificate Trust Settings → enable xwire Root CA. iOS needs this extra step." />
+                <Step n={3} title="Install the profile" body="Settings → General → VPN & Device Management → WireCraft Root CA → Install." />
+                <Step n={4} title="Turn on full trust" body="Settings → General → About → Certificate Trust Settings → enable WireCraft Root CA. iOS needs this extra step." />
               {/if}
             </div>
           </div>
-          <Banner tone="info" title="Remove the proxy when you're done" body="Phones keep the manual proxy after xwire quits." />
+          <Banner tone="info" title="Remove the proxy when you're done" body="Phones keep the manual proxy after WireCraft quits." />
         {/if}
       </div>
     </div>
@@ -254,7 +254,7 @@
           <div class="row" style="gap:10px">
             <span class="badge"><Icon name="shield" size={16} color="var(--accent-text)" /></span>
             <div class="col" style="gap:2px">
-              <b style="font-size:13px">xwire Root CA</b>
+              <b style="font-size:13px">WireCraft Root CA</b>
               <span style="font-size:11.5px;color:var(--text-tertiary)">Generated on this machine · never shared</span>
             </div>
           </div>
@@ -304,7 +304,7 @@
 {#if confirmRegen}
   <Modal title="Regenerate the root CA?" onclose={() => (confirmRegen = false)}>
     <p style="margin:0;color:var(--text-secondary);line-height:1.5">
-      xwire creates a new root certificate and restarts the proxy. Every browser, machine and phone that trusted the old one must trust the new one before HTTPS can be decrypted again.
+      WireCraft creates a new root certificate and restarts the proxy. Every browser, machine and phone that trusted the old one must trust the new one before HTTPS can be decrypted again.
     </p>
     {#snippet footer()}
       <button class="btn secondary" onclick={() => (confirmRegen = false)}>Cancel</button>

@@ -55,6 +55,8 @@ export function commands(hooks: { focusFilter: () => void; toggleSidebar: () => 
     { id: "ml", title: "Map Local…", icon: "map", run: () => tools.open("mapLocal") },
     { id: "mr", title: "Map Remote…", icon: "remote", run: () => tools.open("mapRemote") },
     { id: "rw", title: "Rewrite rules…", icon: "rewrite", run: () => tools.open("rewrite") },
+    { id: "js", title: "Scripts…", icon: "code", run: () => tools.open("scripts") },
+    { id: "jslog", title: "Clear script console", icon: "trash", run: () => api.clearScriptLogs() },
     { id: "block", title: "Blocked hosts…", icon: "x", run: () => tools.open("block") },
     { id: "throttle", title: "Throttle the network…", icon: "throttle", run: () => tools.open("throttle") },
     { id: "resume", title: "Resume all paused requests", icon: "play", when: () => tools.paused.length > 0, run: () => tools.resumeAll() },

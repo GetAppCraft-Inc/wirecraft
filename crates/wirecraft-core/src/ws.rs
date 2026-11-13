@@ -156,11 +156,10 @@ impl Parser {
         if let Some(op) = control {
             let ctrl = std::mem::take(&mut self.ctrl);
             out.push(self.message(op, &ctrl, ctrl.len() as u64));
-        } else if self.fin {
-            if let Some((op, payload, total)) = self.msg.take() {
+        } else if self.fin
+            && let Some((op, payload, total)) = self.msg.take() {
                 out.push(self.message(op, &payload, total));
             }
-        }
     }
 }
 

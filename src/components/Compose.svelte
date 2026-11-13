@@ -43,7 +43,7 @@
       <textarea class="mono" rows="8" bind:value={d.headers} spellcheck="false"></textarea>
       <span class="lbl">Body</span>
       <textarea class="mono" rows="10" bind:value={d.body} spellcheck="false" placeholder={d.method === "GET" ? "GET requests usually have no body" : '{ "key": "value" }'}></textarea>
-      <span class="dim" style="font-size:11.5px">Sent through xwire, so your rules apply and the exchange appears in the table. Content-Length is set for you.</span>
+      <span class="dim" style="font-size:11.5px">Sent through WireCraft, so your rules apply and the exchange appears in the table. Content-Length is set for you.</span>
     </div>
     <div class="ft">
       <button class="btn secondary" onclick={() => (tools.compose = null)}>Cancel</button>

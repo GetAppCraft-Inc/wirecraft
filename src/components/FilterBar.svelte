@@ -37,8 +37,8 @@
       /* ignore */
     }
   }
-  let saved = $state<string[]>(load("xwire.savedFilters"));
-  let recent = $state<string[]>(load("xwire.recentFilters"));
+  let saved = $state<string[]>(load("wirecraft.savedFilters"));
+  let recent = $state<string[]>(load("wirecraft.recentFilters"));
 
   function commit(q = draft) {
     if (timer) clearTimeout(timer);
@@ -49,7 +49,7 @@
     const q = draft.trim();
     if (!q) return;
     recent = [q, ...recent.filter((r) => r !== q)].slice(0, 12);
-    store("xwire.recentFilters", recent);
+    store("wirecraft.recentFilters", recent);
   }
   function oninput() {
     caret = input.selectionStart ?? draft.length;
@@ -186,7 +186,7 @@
     const q = draft.trim();
     if (!q) return;
     saved = saved.includes(q) ? saved.filter((s) => s !== q) : [q, ...saved];
-    store("xwire.savedFilters", saved);
+    store("wirecraft.savedFilters", saved);
   }
   function pickHistory(q: string) {
     draft = q;

@@ -1,19 +1,19 @@
 [package]
-name = "xwire"
+name = "wirecraft"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Open-source native HTTPS debugging proxy"
 
 [lib]
-name = "xwire_app"
+name = "wirecraft_app"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-xwire-core.workspace = true
+wirecraft-core.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

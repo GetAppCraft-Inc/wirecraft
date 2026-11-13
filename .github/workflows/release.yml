@@ -1,0 +1,176 @@
+name: Release
+
+# The release cycle (docs/releasing.md):
+#   1. bump the version on main:  cargo xtask version set 0.3.0   (or 0.3.0-rc.1)
+#   2. fast-forward `release` to main and push: this workflow builds every installer into a DRAFT
+#      GitHub Release "WireCraft v0.3.0" (tag v0.3.0) with SHA256SUMS.txt and notes from the merged PRs
+#   3. check the draft, then publish it. `-rc.N` versions are marked pre-release.
+# Nightly, the same builds run on main as a dry run (nothing signed or released) so release-only breakage
+# shows up before release day.
+
+on:
+  schedule:
+    - cron: "40 1 * * *"
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override for a test run, e.g. 0.3.0-rc.1 (empty: Cargo.toml)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_TITLE: WireCraft
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      dry-run: ${{ steps.v.outputs.dry_run }}
+      release-id: ${{ steps.draft.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Work out the version
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            v=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)
+          fi
+          v="${v#v}"
+          if ! echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$v' is not a version"; exit 1
+          fi
+          # only a push to `release` publishes anything; schedules and manual runs elsewhere are dry runs
+          dry=true
+          if [ "${{ github.ref }}" = "refs/heads/release" ] && [ "${{ github.event_name }}" != "schedule" ]; then dry=false; fi
+          pre=false
+          case "$v" in *-*) pre=true ;; esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
+          echo "### $APP_TITLE v$v" >> "$GITHUB_STEP_SUMMARY"
+          echo "dry run: $dry · pre-release: $pre" >> "$GITHUB_STEP_SUMMARY"
+      - id: draft
+        name: Create or reuse the draft release
+        if: steps.v.outputs.dry_run == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          PRE: ${{ steps.v.outputs.prerelease }}
+        run: |
+          if draft=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::$TAG is already published. Bump the version (cargo xtask version set …) before releasing again."
+              exit 1
+            fi
+            # rebuilding a draft: point it at this commit and clear the old assets
+            gh release edit "$TAG" --target "$GITHUB_SHA"
+            gh release view "$TAG" --json assets -q '.assets[].name' | while read -r a; do
+              [ -n "$a" ] && gh release delete-asset "$TAG" "$a" -y
+            done
+          else
+            flags=""
+            [ "$PRE" = "true" ] && flags="--prerelease"
+            gh release create "$TAG" --draft --generate-notes --title "$APP_TITLE $TAG" --target "$GITHUB_SHA" $flags
+          fi
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -q ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-22.04
+            args: ""
+          - name: macos-universal
+            os: macos-latest
+            args: "--target universal-apple-darwin"
+          - name: windows-x64
+            os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev rpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply the version override
+        if: inputs.version != ''
+        shell: bash
+        run: cargo xtask version set "${{ needs.prepare.outputs.version }}"
+      - name: Report missing signing secrets
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          if [ "$HAS_CERT" != "true" ]; then
+            echo "::warning::APPLE_CERTIFICATE is not set: the macOS build is unsigned and not notarized"
+          fi
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          # empty on dry runs: build only, nothing is uploaded to a release
+          releaseId: ${{ needs.prepare.outputs.dry-run == 'false' && needs.prepare.outputs.release-id || '' }}
+          args: ${{ matrix.args }}
+      - name: Keep the dry-run bundles
+        if: needs.prepare.outputs.dry-run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wirecraft-${{ needs.prepare.outputs.version }}-${{ matrix.name }}
+          path: target/**/release/bundle/
+          retention-days: 7
+
+  checksums:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.dry-run == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          mkdir assets && cd assets
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern '*'
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+          gh release upload "$TAG" SHA256SUMS.txt --clobber -R "$GITHUB_REPOSITORY"
+          echo "Draft ready: publish it from https://github.com/$GITHUB_REPOSITORY/releases" >> "$GITHUB_STEP_SUMMARY"

@@ -1,4 +1,4 @@
-# xwire build — progress
+# WireCraft (formerly xwire) build — progress
 
 Stack (user-chosen 2026-11-11): **Tauri 2 + Svelte 5/TS UI** over a **Rust MITM core**. Scope for v1: real proxy +
 3-pane workspace + onboarding, matching `design/` (source of truth; tokens in `design/generator/lib.py`).
@@ -54,11 +54,51 @@ Stack (user-chosen 2026-11-11): **Tauri 2 + Svelte 5/TS UI** over a **Rust MITM 
 - Tests: `cargo test --workspace` — unit (rules, ws parser, HAR round trip) + e2e (`tests/rules.rs`,
   `tests/websocket.rs`) through the real proxy.
 
-## Resume here (next steps)
-1. Scripts (toolbar button still disabled): needs an embedded JS engine (e.g. boa / rquickjs) + sandboxing design.
-2. Not exercised by hand (no click automation): Execute/Abort buttons, rules editor typing, Compose send, session
-   save/delete, HAR export dialog, system-proxy toggle, CA install buttons, light theme, 1024 layout.
-3. Not built: SOCKS5 listener, gRPC message decoding, .chls/.proxymansession import.
-4. Perf: filtering re-scans all flows per 60 ms batch; fine to ~50k, index if needed for 200k.
+- Scripts (`crates/xwire-core/src/scripts.rs`): sandboxed QuickJS (rquickjs) — fresh runtime per run, 64 MB heap,
+  1 MB stack, wall-clock deadline via interrupt handler (default 1 s, per-script `timeoutMs`), no host bindings.
+  `onRequest(ctx, req)` / `onResponse(ctx, req, res)`, sync or async; `onRequest` may return `{ response }` to
+  answer locally; objects as bodies are JSON-serialised; `ctx.state` persists per script; console output in a
+  1000-line ring (`script_logs`). Runs after Block / before request breakpoint, and after response rewrites /
+  before response breakpoint. Errors or timeouts leave the exchange untouched and tag the flow "Script error".
+  UI: Scripts tab in RulesSheet (editor with Tab indent, live syntax/handler check, timeout, reset state,
+  ScriptConsole), toolbar/status bar counts, row menu "New script…", palette commands.
+- SOCKS5 on the proxy port (first byte 0x05 sniffed): no-auth CONNECT, IPv4/IPv6/domain; then handled exactly like
+  an HTTP CONNECT (TLS intercepted using SNI, plain HTTP decoded, else blind). Server-speaks-first protocols in any
+  tunnel fall back to blind after 2 s of client silence.
+- gRPC / gRPC-Web / gRPC-Web-Text / protobuf (`grpc.rs`): framing, gzip/deflate/zstd per-message compression,
+  gRPC-Web trailers, schemaless field decode (nested-message guess, sint/double/float alternatives, packed
+  varints). Exposed as `BodyView.grpc`; inspector "Protobuf" mode (ProtobufView/PbFields). HTTP/2 response trailers
+  are now captured (`Flow.resp_trailers`) and shown under response headers.
+- Charles JSON session import (`src-tauri/src/charles.rs`, `.chlsj`), auto-detected by `import_har`.
+- UI filtering is incremental for the default sort (patches only flows changed in the batch; full rebuild on
+  filter/sort change, removals, or a flow leaving/entering the view out of order).
+- Headless example takes `XWIRE_RULES=rules.json`.
+- Tests: `cargo test --workspace` (31) incl. e2e `tests/scripts_socks.rs`; clippy clean.
+- Verified 2026-11-13: real traffic via `curl --socks5-hostname`, `--socks5` (IP target), `-x http` to example.com /
+  httpbin.org with scripts applied; app run with `WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=x11 npx tauri dev`
+  (without the DMABUF flag the webview is blank under XWayland here); Scripts sheet and Protobuf view inspected.
 
-Known nits: clippy collapsible-if ×8 in core (style only).
+## 0.2.0 — rename, brand, versioning, releases (2026-11-13)
+- Renamed xwire → **WireCraft**: crates `wirecraft-core` / `wirecraft` (lib `wirecraft_app`), bundle id
+  `dev.wirecraft.app`, env `WIRECRAFT_*`, headers `x-wirecraft-*`, special hosts `wirecraft.check|cert|ssl`, CA files
+  `wirecraft-root.*`. `wirecraft_core::paths` moves an existing `<data|config>/xwire` folder to `wirecraft` once,
+  and `ca.rs` renames legacy `xwire-root.*` files, so an already-trusted CA keeps working. `design/` (figcraft
+  source and renders) still says xwire.
+- Logo: engraved owl on a wire, periwinkle tile (`scripts/gen-logo.py` → `assets/app-icon/*.svg` + hicolor PNGs;
+  Tauri icons via `npx tauri icon`). In-app `Logo.svelte` uses the small variant + "WireCraft" wordmark.
+- Version 0.2.0, single source `[workspace.package]`; `cargo xtask version [set x.y.z]`, `cargo xtask ci`.
+- `.github/workflows/ci.yml`, `release.yml` (push `release` → draft "WireCraft vX" with installers + SHA256SUMS,
+  `-rc` = pre-release, nightly dry run, refuses re-release of published versions), `.github/release.yml`,
+  `docs/releasing.md`. Workflows not yet run on GitHub.
+- README in the figcraft layout with real screenshots (`docs/images/`), MIT `LICENSE`.
+- Fix: a client hanging up right after the last byte of a Content-Length body (h2 upstream END_STREAM not yet
+  seen) was recorded as "client closed the connection" (TeeBody `expect_len`).
+- Known: countries.trevorblades.com GraphQL at `/` classifies as JSON, not GQL (classifier looks at the path).
+
+## Not done / out of scope
+- `.chls` (binary Java serialisation) and `.proxymansession`/`.proxymanlogv2` (proprietary) can't be read; both apps
+  export HAR, and Charles also JSON.
+- No .proto schema loading (decode is schemaless).
+- Still not exercised by clicking (no input automation available): Execute/Abort, rules editor typing, Compose send,
+  session save/delete, HAR export dialog, system-proxy toggle, CA install buttons, light theme, 1024 layout.
+- SOCKS4, SOCKS5 username/password auth and UDP ASSOCIATE.

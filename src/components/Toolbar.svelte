@@ -15,7 +15,7 @@
     { ic: "map", label: "Map Local", run: () => tools.open("mapLocal"), count: () => tools.counts.mapLocal },
     { ic: "remote", label: "Map Remote", run: () => tools.open("mapRemote"), count: () => tools.counts.mapRemote },
     { ic: "rewrite", label: "Rewrite", run: () => tools.open("rewrite"), count: () => tools.counts.rewrite },
-    { ic: "code", label: "Scripts", run: () => {}, count: () => 0, disabled: "Scripts — not available yet" },
+    { ic: "code", label: "Scripts", run: () => tools.open("scripts"), count: () => tools.counts.scripts },
     { ic: "send", label: "Compose", run: () => tools.composeFrom(null), count: () => 0 },
     { ic: "diff", label: "Diff", run: () => tools.compare(app.selection()), count: () => 0 },
   ];

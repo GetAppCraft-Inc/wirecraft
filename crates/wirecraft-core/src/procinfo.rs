@@ -118,11 +118,10 @@ mod linux {
             };
             let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
             for fd in fds.flatten() {
-                if let Ok(target) = std::fs::read_link(fd.path()) {
-                    if target.as_os_str() == needle.as_str() {
+                if let Ok(target) = std::fs::read_link(fd.path())
+                    && target.as_os_str() == needle.as_str() {
                         return Some(ClientProc { pid, name: process_name(pid) });
                     }
-                }
             }
         }
         None
@@ -130,11 +129,10 @@ mod linux {
 
     fn process_name(pid: u32) -> String {
         // prefer the executable's basename; `comm` is truncated to 15 chars and often a thread name
-        if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-            if let Some(n) = exe.file_name().and_then(|s| s.to_str()) {
+        if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe"))
+            && let Some(n) = exe.file_name().and_then(|s| s.to_str()) {
                 return n.to_string();
             }
-        }
         std::fs::read_to_string(format!("/proc/{pid}/comm")).map(|s| s.trim().to_string()).unwrap_or_else(|_| pid.to_string())
     }
 

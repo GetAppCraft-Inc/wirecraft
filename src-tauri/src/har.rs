@@ -4,8 +4,8 @@ use base64::Engine;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use xwire_core::Flow;
-use xwire_core::store::Headers;
+use wirecraft_core::Flow;
+use wirecraft_core::store::Headers;
 
 fn header(h: &Headers, name: &str) -> Option<String> {
     h.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
@@ -67,7 +67,7 @@ fn entry(f: &Flow) -> Value {
     let authority = if s.port == default_port { s.host.clone() } else { format!("{}:{}", s.host, s.port) };
     let url = format!("{}://{}{}", s.scheme, authority, s.path);
 
-    let (req_body, _) = xwire_core::proxy::decoded_body(&f.req_body, &f.req_headers);
+    let (req_body, _) = wirecraft_core::proxy::decoded_body(&f.req_body, &f.req_headers);
     let post = if req_body.is_empty() {
         Value::Null
     } else {
@@ -77,7 +77,7 @@ fn entry(f: &Flow) -> Value {
         })
     };
 
-    let (resp_body, _) = xwire_core::proxy::decoded_body(&f.resp_body, &f.resp_headers);
+    let (resp_body, _) = wirecraft_core::proxy::decoded_body(&f.resp_body, &f.resp_headers);
     let mime = header(&f.resp_headers, "content-type").unwrap_or_default();
     let content = match std::str::from_utf8(&resp_body) {
         Ok(t) => json!({ "size": resp_body.len(), "mimeType": mime, "text": t }),
@@ -148,7 +148,7 @@ pub fn build(flows: &[Flow], version: &str) -> Value {
     json!({
         "log": {
             "version": "1.2",
-            "creator": { "name": "xwire", "version": version },
+            "creator": { "name": "WireCraft", "version": version },
             "pages": [],
             "entries": flows.iter().map(entry).collect::<Vec<_>>(),
         }
@@ -176,10 +176,10 @@ fn ms(v: Option<&Value>) -> Option<f64> {
 }
 
 /// Load the entries of a HAR document into the store. Returns how many were imported.
-pub fn import(store: &xwire_core::Store, text: &str, source: &str) -> Result<usize, String> {
+pub fn import(store: &wirecraft_core::Store, text: &str, source: &str) -> Result<usize, String> {
     use bytes::Bytes;
-    use xwire_core::store::{Timing, WsMessage};
-    use xwire_core::{Flow, FlowState, FlowSummary};
+    use wirecraft_core::store::{Timing, WsMessage};
+    use wirecraft_core::{Flow, FlowState, FlowSummary};
 
     let doc: Value = serde_json::from_str(text).map_err(|e| format!("Not a HAR file: {e}"))?;
     let entries = doc.pointer("/log/entries").and_then(|e| e.as_array()).ok_or("Not a HAR file: no log.entries")?;
@@ -239,7 +239,7 @@ pub fn import(store: &xwire_core::Store, text: &str, source: &str) -> Result<usi
                 http_version: req["httpVersion"].as_str().unwrap_or("HTTP/1.1").to_string(),
                 status,
                 state: if status.is_some() { FlowState::Complete } else { FlowState::Error },
-                kind: xwire_core::body::classify(&method, &path, req_ct.as_deref(), ct.as_deref(), !ws.is_empty()).into(),
+                kind: wirecraft_core::body::classify(&method, &path, req_ct.as_deref(), ct.as_deref(), !ws.is_empty()).into(),
                 content_type: ct,
                 req_size: req_body.len() as u64,
                 resp_size: content["size"].as_u64().unwrap_or(resp_body.len() as u64),
@@ -264,6 +264,7 @@ pub fn import(store: &xwire_core::Store, text: &str, source: &str) -> Result<usi
             resp_headers,
             resp_body,
             resp_body_truncated: false,
+            resp_trailers: vec![],
             timing: Timing {
                 started,
                 request_ms: ms(t.get("send")),
@@ -296,7 +297,7 @@ mod tests {
                 "content": { "size": 7, "mimeType": "application/json", "text": "e30=", "encoding": "base64" } },
             "timings": { "send": 1, "wait": 100, "receive": 19.5 }
         }]}});
-        let store = xwire_core::Store::new(10);
+        let store = wirecraft_core::Store::new(10);
         assert_eq!(import(&store, &doc.to_string(), "/tmp/x.har").unwrap(), 1);
         let f = store.get(store.ids()[0]).unwrap();
         assert_eq!((f.summary.method.as_str(), f.summary.port, f.summary.path.as_str()), ("POST", 8443, "/v1/x?a=1"));

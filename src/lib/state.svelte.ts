@@ -69,7 +69,7 @@ export function baseDomain(host: string): string {
 
 export function deviceOf(f: FlowSummary): string {
   const ip = f.clientAddr.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
-  if (ip === "xwire") return "xwire";
+  if (ip === "wirecraft") return "WireCraft";
   if (ip === "127.0.0.1" || ip === "::1" || ip.startsWith("::ffff:127.")) return "This computer";
   return ip.replace(/^::ffff:/, "");
 }
@@ -122,6 +122,13 @@ class App {
   private detailTimer: ReturnType<typeof setTimeout> | null = null;
   private bodyTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Incremental filtering: ids upserted / newly arrived since `filtered` last ran, and whether something
+  // happened (removal, clear, resync) that needs a full rebuild.
+  private dirty = new Set<number>();
+  private arrivedIds = new Set<number>();
+  private structural = true;
+  private lastFilter: { key: unknown[]; out: FlowSummary[]; pos: Map<number, number> } | null = null;
+
   terms = $derived(parse(this.query));
   /** Number of captured flows (reactive). */
   total = $derived.by(() => {
@@ -134,20 +141,59 @@ class App {
     const terms = this.terms;
     const chip = this.chip;
     const src = this.source;
+    const sort = this.sort;
+    const key: unknown[] = [terms, chip, src, sort.key, sort.desc, this.pinned, this.bodyHits];
     const ctx: MatchCtx = { pinned: this.pinned, bodyHits: this.bodyHits };
+    const test = (f: FlowSummary) =>
+      (chip === "all" || chipMatch(chip, f)) && (!src || this.sourceMatch(src, f)) && (!terms.length || matches(terms, f, ctx, url(f)));
+
+    const dirty = this.dirty, arrived = this.arrivedIds;
+    this.dirty = new Set();
+    this.arrivedIds = new Set();
+    const prev = this.lastFilter;
+    const sameFilter = prev != null && !this.structural && prev.key.length === key.length && prev.key.every((k, i) => k === key[i]);
+    // Patch the previous result when only some flows changed and rows are in arrival order.
+    if (sameFilter && prev && sort.key === "idx" && !sort.desc) {
+      const out = prev.out.slice();
+      const pos = prev.pos;
+      let ok = true;
+      for (const id of dirty) {
+        const f = this.byId.get(id);
+        if (!f) continue;
+        const at = pos.get(id);
+        const hit = test(f);
+        if (at != null) {
+          if (!hit) { ok = false; break; } // dropped out of the view: rebuild
+          out[at] = f;
+        } else if (hit) {
+          if (!arrived.has(id)) { ok = false; break; } // an older flow started matching: rebuild
+        }
+      }
+      if (ok) {
+        // arrivals go at the end, in arrival order
+        for (const id of this.order.slice(this.order.length - arrived.size)) {
+          if (!arrived.has(id) || pos.has(id)) continue;
+          const f = this.byId.get(id);
+          if (f && test(f)) {
+            pos.set(id, out.length);
+            out.push(f);
+          }
+        }
+        this.lastFilter = { key, out, pos };
+        return out;
+      }
+    }
+
+    this.structural = false;
     const out: FlowSummary[] = [];
     for (const id of this.order) {
       const f = this.byId.get(id);
-      if (!f) continue;
-      if (chip !== "all" && !chipMatch(chip, f)) continue;
-      if (src && !this.sourceMatch(src, f)) continue;
-      if (terms.length && !matches(terms, f, ctx, url(f))) continue;
-      out.push(f);
+      if (f && test(f)) out.push(f);
     }
-    const { key, desc } = this.sort;
-    if (key !== "idx" || desc) {
+    const { key: sk, desc } = sort;
+    if (sk !== "idx" || desc) {
       const val = (f: FlowSummary): number | string => {
-        switch (key) {
+        switch (sk) {
           case "idx": case "time": return f.id;
           case "method": return f.method;
           case "status": return f.status ?? -1;
@@ -165,6 +211,7 @@ class App {
         return desc ? -c : c;
       });
     }
+    this.lastFilter = { key, out, pos: new Map(out.map((f, i) => [f.id, i])) };
     return out;
   });
 
@@ -189,7 +236,7 @@ class App {
     applyTheme(st.settings.theme);
     if (!st.settings.onboarded) this.screen = "onboarding";
     try {
-      this.hiddenCols = JSON.parse(localStorage.getItem("xwire.hiddenCols") ?? "[]");
+      this.hiddenCols = JSON.parse(localStorage.getItem("wirecraft.hiddenCols") ?? "[]");
     } catch {
       /* ignore */
     }
@@ -213,6 +260,7 @@ class App {
     const all = await api.listFlows();
     this.byId.clear();
     this.order = [];
+    this.structural = true;
     for (const f of all) {
       this.byId.set(f.id, f);
       this.order.push(f.id);
@@ -232,18 +280,22 @@ class App {
         const f = ev.flow;
         if (!this.byId.has(f.id)) {
           this.order.push(f.id);
+          this.arrivedIds.add(f.id);
           arrived++;
         }
         this.byId.set(f.id, f);
+        this.dirty.add(f.id);
         if (f.id === this.selected) touchedSelected = true;
       } else if (ev.type === "removed") {
         const set = new Set(ev.ids);
+        this.structural = true;
         for (const id of ev.ids) this.byId.delete(id);
         this.order = this.order.filter((id) => !set.has(id));
         if (this.selected != null && set.has(this.selected)) this.select(null);
       } else {
         this.byId.clear();
         this.order = [];
+        this.structural = true;
         this.select(null);
         this.newSincePause = 0;
       }
@@ -400,7 +452,7 @@ class App {
   hideCol(key: string, hidden: boolean) {
     this.hiddenCols = hidden ? [...new Set([...this.hiddenCols, key])] : this.hiddenCols.filter((k) => k !== key);
     try {
-      localStorage.setItem("xwire.hiddenCols", JSON.stringify(this.hiddenCols));
+      localStorage.setItem("wirecraft.hiddenCols", JSON.stringify(this.hiddenCols));
     } catch {
       /* ignore */
     }

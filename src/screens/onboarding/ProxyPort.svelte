@@ -109,7 +109,7 @@
   <div class="hd">
     <div class="col">
       <h2>Proxy &amp; port</h2>
-      <p>How apps reach xwire. Change any of this later from the toolbar's settings button.</p>
+      <p>How apps reach WireCraft. Change any of this later from the toolbar's settings button.</p>
     </div>
     <Stepper active={1} onstep={(i) => i === 0 && onback()} />
   </div>
@@ -121,7 +121,7 @@
           <span class="badge"><Icon name="plug" size={16} color="var(--accent-text)" /></span>
           <div class="col">
             <b style="font-size:13.5px">System proxy</b>
-            <span class="sub">Routes HTTP and HTTPS from every app that honours the OS proxy. Turned off again when xwire quits.</span>
+            <span class="sub">Routes HTTP and HTTPS from every app that honours the OS proxy. Turned off again when WireCraft quits.</span>
           </div>
           {#if sysProxy?.enabled}
             <span class="pill" style="background:var(--success-soft);color:var(--success-default)"><span class="dot" style="background:var(--success-default)"></span>On</span>
@@ -149,7 +149,7 @@
               {#if !portValid}
                 <span class="hint" style="color:var(--error-default)">invalid</span>
               {:else if portCheck?.free}
-                <span class="hint" style="color:var(--success-default)">✓ {portCheck.owner === "xwire" ? "in use by xwire" : "free"}</span>
+                <span class="hint" style="color:var(--success-default)">✓ {portCheck.owner === "wirecraft" ? "in use by WireCraft" : "free"}</span>
               {:else if portCheck}
                 <span class="hint" style="color:var(--error-default)">in use</span>
               {/if}

@@ -12,8 +12,8 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use xwire_core::rules::*;
-use xwire_core::{CertAuthority, FlowState, Proxy, ProxyOptions, Store};
+use wirecraft_core::rules::*;
+use wirecraft_core::{CertAuthority, FlowState, Proxy, ProxyOptions, Store};
 
 /// Upstream that echoes the method, path, `x-*` request headers and body.
 async fn upstream() -> SocketAddr {
@@ -54,7 +54,7 @@ struct Rig {
 }
 
 async fn rig(r: Rules) -> Rig {
-    let dir = std::env::temp_dir().join(format!("xwire-test-{}-{}", std::process::id(), rand_suffix()));
+    let dir = std::env::temp_dir().join(format!("wirecraft-test-{}-{}", std::process::id(), rand_suffix()));
     let ca = Arc::new(CertAuthority::generate(&dir).unwrap());
     let store = Store::new(1000);
     let rules: SharedRules = Arc::new(parking_lot::RwLock::new(Arc::new(r)));

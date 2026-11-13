@@ -34,6 +34,7 @@
   {#if !compact}
     {#if tools.counts.mapLocal}<button class="lnk" onclick={() => tools.open("mapLocal")}>Map Local {tools.counts.mapLocal}</button>{/if}
     {#if tools.counts.mapRemote}<button class="lnk" onclick={() => tools.open("mapRemote")}>Map Remote {tools.counts.mapRemote}</button>{/if}
+    {#if tools.counts.scripts}<button class="lnk" onclick={() => tools.open("scripts")}>Scripts {tools.counts.scripts}</button>{/if}
     {#if tools.counts.rewrite}<button class="lnk" onclick={() => tools.open("rewrite")}>Rewrite {tools.counts.rewrite} rule{tools.counts.rewrite === 1 ? "" : "s"}</button>{/if}
     {#if tools.counts.block}<button class="lnk" onclick={() => tools.open("block")}>Blocking {tools.counts.block}</button>{/if}
   {/if}
@@ -47,7 +48,7 @@
     <span class="h"><Kbd keys={["Ctrl", "K"]} size={10} /> Commands</span>
     <span class="h"><Kbd keys={["?"]} size={10} /> Shortcuts</span>
   {/if}
-  <span class="mono t3" style="font-size:10.5px">xwire {app.info?.version ?? ""}</span>
+  <span class="mono t3" style="font-size:10.5px">WireCraft {app.info?.version ?? ""}</span>
 </footer>
 
 <style>

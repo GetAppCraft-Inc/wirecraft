@@ -77,7 +77,7 @@ pub fn wildcard(pattern: &str, text: &str) -> bool {
     i == p.len()
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
@@ -385,11 +385,13 @@ pub struct Rules {
     pub breakpoints: Vec<Breakpoint>,
     pub block: Vec<Block>,
     pub throttle: Throttle,
+    pub scripts: Vec<crate::scripts::Script>,
     /// Master switches per tool, so a whole tool can be turned off without losing its rules.
     pub map_local_on: bool,
     pub map_remote_on: bool,
     pub rewrite_on: bool,
     pub breakpoints_on: bool,
+    pub scripts_on: bool,
 }
 
 impl Rules {
@@ -420,6 +422,12 @@ impl Rules {
             .find(|b| b.enabled && (if response { b.response } else { b.request }) && b.matcher.matches(method, url))
     }
 
+    pub fn scripts_for<'a>(&'a self, method: &'a str, url: &'a str, response: bool) -> impl Iterator<Item = &'a crate::scripts::Script> + 'a {
+        self.scripts.iter().filter(move |s| {
+            self.scripts_on && s.enabled && (if response { s.response } else { s.request }) && s.matcher.matches(method, url)
+        })
+    }
+
     pub fn blocked(&self, method: &str, url: &str) -> bool {
         self.block.iter().any(|b| b.enabled && b.matcher.matches(method, url))
     }
@@ -430,6 +438,7 @@ impl Rules {
         m.insert("mapLocal", if self.map_local_on { self.map_local.iter().filter(|r| r.enabled).count() } else { 0 });
         m.insert("mapRemote", if self.map_remote_on { self.map_remote.iter().filter(|r| r.enabled).count() } else { 0 });
         m.insert("rewrite", if self.rewrite_on { self.rewrite.iter().filter(|r| r.enabled).count() } else { 0 });
+        m.insert("scripts", if self.scripts_on { self.scripts.iter().filter(|r| r.enabled).count() } else { 0 });
         m.insert("breakpoints", if self.breakpoints_on { self.breakpoints.iter().filter(|r| r.enabled).count() } else { 0 });
         m
     }

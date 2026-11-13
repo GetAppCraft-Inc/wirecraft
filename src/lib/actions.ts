@@ -29,7 +29,7 @@ export async function copyFlowAs(id: number, fmt: CopyFormat) {
 }
 
 export async function exportHar(ids?: number[]) {
-  const path = await save({ defaultPath: ids ? "xwire-selection.har" : "xwire-session.har", filters: [{ name: "HAR", extensions: ["har"] }] });
+  const path = await save({ defaultPath: ids ? "wirecraft-selection.har" : "wirecraft-session.har", filters: [{ name: "HAR", extensions: ["har"] }] });
   if (!path) return;
   try {
     const n = await api.exportHar(path, ids);
@@ -85,6 +85,7 @@ export function rowMenu(f: FlowSummary): MenuItem[] {
     { label: "Map local…", icon: "map", disabled: f.method === "CONNECT", run: () => mapLocalFrom(f) },
     { label: "Map remote…", icon: "remote", run: () => tools.addMapRemote(f) },
     { label: "New rewrite rule…", icon: "rewrite", run: () => tools.addRewrite(f) },
+    { label: "New script…", icon: "code", run: () => tools.addScript(f) },
     { label: "Block host", icon: "x", run: () => tools.blockHost(f.host) },
     "-",
     { label: "Filter to this host", icon: "filter", run: () => (app.query = `host:${f.host}`) },

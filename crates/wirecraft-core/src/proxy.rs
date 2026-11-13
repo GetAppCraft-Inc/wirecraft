@@ -77,11 +77,10 @@ impl InterceptConfig {
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p = pattern.trim().to_ascii_lowercase();
     let t = text.to_ascii_lowercase();
-    if let Some(rest) = p.strip_prefix("*.") {
-        if t == rest {
+    if let Some(rest) = p.strip_prefix("*.")
+        && t == rest {
             return true;
         }
-    }
     fn m(p: &[u8], t: &[u8]) -> bool {
         match p.first() {
             None => t.is_empty(),
@@ -215,7 +214,7 @@ impl Proxy {
                 }
             }
         });
-        tracing::info!("xwire proxy listening on {local}");
+        tracing::info!("WireCraft proxy listening on {local}");
         Ok(Self { shared, stop: Some(stop) })
     }
 
@@ -256,7 +255,7 @@ impl Proxy {
         let default = if s.scheme == "https" { 443 } else { 80 };
         let auth = if s.port == default { s.host.clone() } else { format!("{}:{}", s.host, s.port) };
         let url = format!("{}://{}{}", s.scheme, auth, s.path);
-        self.send(&s.method, &url, &f.req_headers, f.req_body.clone(), "xwire · repeat")
+        self.send(&s.method, &url, &f.req_headers, f.req_body.clone(), "WireCraft · repeat")
     }
 
     /// Send a new request through the proxy pipeline (rules apply). Returns the new flow id immediately; the
@@ -273,7 +272,7 @@ impl Proxy {
             headers: headers_from_list(headers),
             body,
             client: Some(client.to_string()),
-            client_addr: "xwire".into(),
+            client_addr: "wirecraft".into(),
             tls: None,
             started: Instant::now(),
             started_unix: now_ms(),
@@ -322,6 +321,11 @@ async fn serve_plain(sh: Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
         });
     }
     let conn = Conn { peer, process, scheme: "http", target: None, tls: None };
+    // SOCKS5 shares the port: its greeting starts with the version byte 0x05, which no HTTP request does.
+    let mut first = [0u8; 1];
+    if matches!(stream.peek(&mut first).await, Ok(1)) && first[0] == 0x05 {
+        return serve_socks5(sh, conn, stream).await;
+    }
     let svc = service_fn(move |req| {
         let sh = sh.clone();
         let conn = conn.clone();
@@ -396,6 +400,71 @@ fn handle_connect(sh: Arc<Shared>, conn: Conn, mut req: Request<Incoming>) -> Re
     Response::new(full(Bytes::new()))
 }
 
+/// SOCKS5 (RFC 1928), no authentication, CONNECT only. The tunnel is then handled exactly like an HTTP
+/// CONNECT: decrypted when interception applies to the host, passed through otherwise.
+async fn serve_socks5(sh: Arc<Shared>, conn: Conn, mut s: TcpStream) {
+    use tokio::io::AsyncWriteExt;
+    let target = async {
+        let mut hdr = [0u8; 2];
+        s.read_exact(&mut hdr).await?;
+        let mut methods = vec![0u8; hdr[1] as usize];
+        s.read_exact(&mut methods).await?;
+        if !methods.contains(&0x00) {
+            s.write_all(&[0x05, 0xff]).await?;
+            return Err(std::io::Error::other("client offers no supported SOCKS auth method"));
+        }
+        s.write_all(&[0x05, 0x00]).await?;
+        let mut req = [0u8; 4];
+        s.read_exact(&mut req).await?;
+        let host = match req[3] {
+            0x01 => {
+                let mut a = [0u8; 4];
+                s.read_exact(&mut a).await?;
+                std::net::Ipv4Addr::from(a).to_string()
+            }
+            0x03 => {
+                let mut n = [0u8; 1];
+                s.read_exact(&mut n).await?;
+                let mut name = vec![0u8; n[0] as usize];
+                s.read_exact(&mut name).await?;
+                String::from_utf8_lossy(&name).into_owned()
+            }
+            0x04 => {
+                let mut a = [0u8; 16];
+                s.read_exact(&mut a).await?;
+                std::net::Ipv6Addr::from(a).to_string()
+            }
+            _ => {
+                s.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+                return Err(std::io::Error::other("unsupported SOCKS address type"));
+            }
+        };
+        let mut port = [0u8; 2];
+        s.read_exact(&mut port).await?;
+        let port = u16::from_be_bytes(port);
+        if req[0] != 0x05 || req[1] != 0x01 {
+            // only CONNECT; BIND and UDP ASSOCIATE are refused
+            s.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+            return Err(std::io::Error::other("unsupported SOCKS command"));
+        }
+        s.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        Ok((host, port))
+    }
+    .await;
+    let (host, port) = match target {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!("SOCKS5 {}: {e}", conn.peer);
+            return;
+        }
+    };
+    if sh.intercept.read().should_decrypt(&host) {
+        intercept_tunnel(sh, conn, s, host, port, None).await;
+    } else {
+        blind_tunnel(sh, conn, s, host, port, None, Some("SOCKS5 · tunnelled".into())).await;
+    }
+}
+
 fn tunnel_flow(sh: &Shared, conn: &Conn, host: &str, port: u16, ua: Option<&str>) -> Option<u64> {
     if !sh.store.recording() {
         return None;
@@ -438,6 +507,7 @@ fn tunnel_flow(sh: &Shared, conn: &Conn, host: &str, port: u16, ua: Option<&str>
         resp_headers: vec![],
         resp_body: Bytes::new(),
         resp_body_truncated: false,
+            resp_trailers: vec![],
         timing: Timing { started, ..Default::default() },
         tls: None,
         ws: vec![],
@@ -485,9 +555,11 @@ where
 {
     // Peek at the first byte: 0x16 is a TLS handshake record; anything else is plain HTTP through the tunnel.
     let mut first = vec![0u8; 1];
-    match io.read(&mut first).await {
-        Ok(0) | Err(_) => return,
-        Ok(_) => {}
+    match tokio::time::timeout(Duration::from_secs(2), io.read(&mut first)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => return,
+        Ok(Ok(_)) => {}
+        // the server talks first (SMTP, IMAP, SSH, …): nothing to decrypt
+        Err(_) => return blind_tunnel(sh, conn, io, host, port, ua, Some("server speaks first".into())).await,
     }
     let io = Rewind::new(Bytes::from(first.clone()), io);
     if first[0] != 0x16 {
@@ -561,7 +633,7 @@ where
 fn record_handshake_failure(sh: &Shared, conn: &Conn, host: &str, port: u16, ua: Option<&str>, err: &str) {
     if let Some(id) = tunnel_flow(sh, conn, host, port, ua) {
         let msg = format!(
-            "TLS handshake failed: {err}. The client doesn't trust the xwire root CA, or it pins certificates \
+            "TLS handshake failed: {err}. The client doesn't trust the WireCraft root CA, or it pins certificates \
              (add the host to Never decrypt to tunnel it untouched)."
         );
         sh.store.update(id, |f| {
@@ -672,7 +744,7 @@ async fn proxy_request(sh: Arc<Shared>, conn: Conn, mut req: Request<Incoming>) 
     let (parts, body) = req.into_parts();
     let body = match body.collect().await {
         Ok(b) => b.to_bytes(),
-        Err(e) => return text_response(StatusCode::BAD_REQUEST, format!("xwire: reading request body: {e}")),
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, format!("WireCraft: reading request body: {e}")),
     };
     let request_ms = started.elapsed().as_secs_f64() * 1000.0;
     let ua = parts.headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok());
@@ -744,6 +816,15 @@ fn retarget(o: &mut Outgoing, url: &str) -> Result<(), String> {
     o.port = p;
     o.path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     Ok(())
+}
+
+fn script_request(o: &Outgoing) -> crate::scripts::ScriptRequest {
+    crate::scripts::ScriptRequest {
+        method: o.method.to_string(),
+        url: display_url(o),
+        headers: header_list(&o.headers),
+        body: o.body.to_vec(),
+    }
 }
 
 fn record_request(sh: &Shared, id: u64, o: &Outgoing) {
@@ -870,6 +951,7 @@ async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::up
             resp_headers: vec![],
             resp_body: Bytes::new(),
             resp_body_truncated: false,
+            resp_trailers: vec![],
             timing: Timing { started: o.started_unix, request_ms: Some(o.request_ms), ..Default::default() },
             tls: o.tls.clone(),
             ws: vec![],
@@ -880,9 +962,64 @@ async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::up
     // ---- block
     if rules.blocked(&original_method, &original_url) {
         mark(&sh, id, "Blocked", Some("blocked".into()));
-        let mut r = text_response(StatusCode::FORBIDDEN, "Blocked by xwire\n");
-        r.headers_mut().insert("x-xwire-blocked", HeaderValue::from_static("1"));
+        let mut r = text_response(StatusCode::FORBIDDEN, "Blocked by WireCraft\n");
+        r.headers_mut().insert("x-wirecraft-blocked", HeaderValue::from_static("1"));
         return finish_local(&sh, id, &o, r);
+    }
+
+    // ---- request scripts
+    let req_scripts: Vec<crate::scripts::Script> = rules.scripts_for(&original_method, &original_url, false).cloned().collect();
+    for script in req_scripts {
+        use crate::scripts::RequestOutcome;
+        let sreq = script_request(&o);
+        let (client, s2, sreq2) = (o.client.clone(), script.clone(), sreq.clone());
+        let res = tokio::task::spawn_blocking(move || crate::scripts::run_request(&s2, id, client.as_deref(), &sreq2))
+            .await
+            .unwrap_or_else(|e| Err(format!("script panicked: {e}")));
+        match res {
+            Ok(Some(RequestOutcome::Continue(r))) => {
+                if r == sreq {
+                    continue;
+                }
+                if r.method != sreq.method {
+                    match Method::from_bytes(r.method.as_bytes()) {
+                        Ok(m) => o.method = m,
+                        Err(_) => return fail(&sh, id, &o, StatusCode::BAD_REQUEST, format!("{}: invalid method {}", script.label(), r.method)),
+                    }
+                }
+                if r.url != sreq.url
+                    && let Err(e) = retarget(&mut o, &r.url) {
+                        return fail(&sh, id, &o, StatusCode::BAD_REQUEST, format!("{}: {e}", script.label()));
+                    }
+                if r.headers != sreq.headers {
+                    o.headers = headers_from_list(&r.headers);
+                }
+                if r.body != sreq.body || r.headers != sreq.headers {
+                    o.body = Bytes::from(r.body);
+                    if o.headers.contains_key(header::CONTENT_LENGTH) || !o.body.is_empty() {
+                        o.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(o.body.len()));
+                    }
+                }
+                mark(&sh, id, "Script", Some(script.label()));
+                if let Some(fid) = id {
+                    record_request(&sh, fid, &o);
+                }
+            }
+            Ok(Some(RequestOutcome::Respond(r))) => {
+                let body = Bytes::from(r.body);
+                let mut resp = Response::new(full(body.clone()));
+                *resp.status_mut() = StatusCode::from_u16(r.status).unwrap_or(StatusCode::OK);
+                *resp.headers_mut() = headers_from_list(&r.headers);
+                resp.headers_mut().remove(header::TRANSFER_ENCODING);
+                resp.headers_mut().remove(header::CONTENT_ENCODING);
+                resp.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+                resp.headers_mut().insert("x-wirecraft-script", HeaderValue::from_static("1"));
+                mark(&sh, id, "Script", Some(format!("{} · answered", script.label())));
+                return respond(sh, o, id, resp, None, None, rules, rewrites, req_ct, 0.0).await;
+            }
+            Ok(None) => {}
+            Err(e) => mark(&sh, id, "Script error", Some(format!("{}: {e}", script.label()))),
+        }
     }
 
     // ---- request breakpoint
@@ -911,16 +1048,14 @@ async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::up
         if r.abort {
             return fail(&sh, id, &o, StatusCode::BAD_GATEWAY, "aborted at a request breakpoint".into());
         }
-        if let Some(m) = r.method.as_deref().filter(|m| !m.trim().is_empty()) {
-            if let Ok(m) = Method::from_bytes(m.trim().to_ascii_uppercase().as_bytes()) {
+        if let Some(m) = r.method.as_deref().filter(|m| !m.trim().is_empty())
+            && let Ok(m) = Method::from_bytes(m.trim().to_ascii_uppercase().as_bytes()) {
                 o.method = m;
             }
-        }
-        if let Some(u) = r.url.as_deref().filter(|u| !u.trim().is_empty()) {
-            if let Err(e) = retarget(&mut o, u.trim()) {
+        if let Some(u) = r.url.as_deref().filter(|u| !u.trim().is_empty())
+            && let Err(e) = retarget(&mut o, u.trim()) {
                 return fail(&sh, id, &o, StatusCode::BAD_REQUEST, e);
             }
-        }
         if let Some(h) = &r.headers {
             o.headers = headers_from_list(h);
         }
@@ -949,21 +1084,20 @@ async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::up
         *r.status_mut() = StatusCode::from_u16(ml.status).unwrap_or(StatusCode::OK);
         *r.headers_mut() = headers_from_list(&ml.headers);
         r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
-        r.headers_mut().insert("x-xwire-map-local", HeaderValue::from_static("1"));
+        r.headers_mut().insert("x-wirecraft-map-local", HeaderValue::from_static("1"));
         let label = if ml.name.trim().is_empty() { "Map Local".to_string() } else { format!("Map Local · {}", ml.name.trim()) };
         mark(&sh, id, "Map Local", Some(label));
         return respond(sh, o, id, r, None, None, rules, rewrites, req_ct, 0.0).await;
     }
 
     // ---- map remote
-    if let Some(mr) = rules.map_remote_for(&original_method, &original_url) {
-        if let Some(u) = crate::rules::map_remote_url(mr, &display_url(&o)) {
+    if let Some(mr) = rules.map_remote_for(&original_method, &original_url)
+        && let Some(u) = crate::rules::map_remote_url(mr, &display_url(&o)) {
             if let Err(e) = retarget(&mut o, &u) {
                 return fail(&sh, id, &o, StatusCode::BAD_REQUEST, e);
             }
             mark(&sh, id, "Map Remote", Some(format!("→ {u}")));
         }
-    }
 
     // ---- throttle (latency + upload)
     let throttle = rules.throttle.applies(&o.host).then(|| rules.throttle.clone());
@@ -1027,7 +1161,7 @@ async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::up
     respond(sh, o, id, resp, upgrade, throttle, rules, rewrites, req_ct, waiting_ms).await
 }
 
-/// A response produced by xwire itself (blocked): record it and send it.
+/// A response produced by WireCraft itself (blocked): record it and send it.
 fn finish_local(sh: &Shared, id: Option<u64>, o: &Outgoing, r: Response<RespBody>) -> Response<RespBody> {
     if let Some(id) = id {
         let status = r.status();
@@ -1040,7 +1174,7 @@ fn finish_local(sh: &Shared, id: Option<u64>, o: &Outgoing, r: Response<RespBody
             f.summary.resp_header_count = headers.len();
             f.status_text = status.canonical_reason().map(|s| s.to_string());
             f.resp_headers = headers;
-            f.resp_body = Bytes::from_static(b"Blocked by xwire\n");
+            f.resp_body = Bytes::from_static(b"Blocked by WireCraft\n");
             f.summary.resp_size = f.resp_body.len() as u64;
             f.timing.total_ms = Some(ms);
         });
@@ -1069,8 +1203,9 @@ async fn respond(
     // ---- response rewrites and breakpoint need the whole body
     let resp_rewrites: Vec<crate::rules::Rewrite> = rewrites.into_iter().filter(|r| r.target.is_response()).collect();
     let bp = id.is_some() && rules.breakpoint_for(&method, &url, true).is_some();
+    let resp_scripts: Vec<crate::scripts::Script> = rules.scripts_for(&method, &url, true).cloned().collect();
     drop(rules);
-    if upgrade.is_none() && (!resp_rewrites.is_empty() || bp) {
+    if upgrade.is_none() && (!resp_rewrites.is_empty() || bp || !resp_scripts.is_empty()) {
         let bytes = match crate::rules::collect_capped(body, RULE_BODY_CAP).await {
             Ok(Some(b)) => b,
             Ok(None) => return fail(&sh, id, &o, StatusCode::BAD_GATEWAY, "response too large for rewrite / breakpoint (32 MB)".into()),
@@ -1101,6 +1236,32 @@ async fn respond(
         }
         if !resp_rewrites.is_empty() {
             mark(&sh, id, "Rewrite", None);
+        }
+        if !resp_scripts.is_empty() {
+            let sreq = script_request(&o);
+            for script in resp_scripts {
+                let sresp = crate::scripts::ScriptResponse { status, headers: hl.clone(), body: std::mem::take(&mut data) };
+                let (client, s2, q, r) = (o.client.clone(), script.clone(), sreq.clone(), sresp.clone());
+                let res = tokio::task::spawn_blocking(move || crate::scripts::run_response(&s2, id, client.as_deref(), &q, &r))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("script panicked: {e}")));
+                match res {
+                    Ok(Some(r)) => {
+                        if r != sresp {
+                            mark(&sh, id, "Script", Some(script.label()));
+                        }
+                        status = r.status;
+                        hl = r.headers;
+                        data = r.body;
+                    }
+                    Ok(None) => data = sresp.body,
+                    Err(e) => {
+                        data = sresp.body;
+                        mark(&sh, id, "Script error", Some(format!("{}: {e}", script.label())));
+                    }
+                }
+            }
+            hl.retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
         }
         if let (Some(fid), true) = (id, bp) {
             let paused = crate::rules::Paused {
@@ -1245,11 +1406,13 @@ async fn respond(
         Some(id) => {
             let sh2 = sh.clone();
             let started = o.started;
+            let expected = parts.headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
             TeeBody::new(body, sh.body_cap, move |d: TeeDone| {
                 let total_ms = started.elapsed().as_secs_f64() * 1000.0;
                 sh2.store.update(id, |f| {
                     f.resp_body = d.captured;
                     f.resp_body_truncated = d.truncated;
+                    f.resp_trailers = d.trailers;
                     f.summary.resp_size = d.total;
                     f.summary.duration_ms = Some(total_ms);
                     f.timing.download_ms = Some(d.elapsed_ms);
@@ -1263,6 +1426,7 @@ async fn respond(
                     }
                 });
             })
+            .expect_len(expected)
             .boxed_unsync()
         }
         None => body,
@@ -1282,28 +1446,28 @@ fn fail(sh: &Shared, id: Option<u64>, o: &Outgoing, status: StatusCode, msg: Str
             f.timing.total_ms = Some(ms);
         });
     }
-    let mut r = text_response(status, format!("xwire could not reach {}:{}\n\n{msg}\n", o.host, o.port));
-    r.headers_mut().insert("x-xwire-error", HeaderValue::from_static("1"));
+    let mut r = text_response(status, format!("WireCraft could not reach {}:{}\n\n{msg}\n", o.host, o.port));
+    r.headers_mut().insert("x-wirecraft-error", HeaderValue::from_static("1"));
     r
 }
 
 fn special_host(sh: &Shared, host: &str) -> Option<Response<RespBody>> {
     match host {
-        // `curl https://xwire.check` through the proxy proves interception works end to end
-        "xwire.check" => {
-            let mut r = Response::new(full(r#"{"ok":true,"proxy":"xwire"}"#));
+        // `curl https://wirecraft.check` through the proxy proves interception works end to end
+        "wirecraft.check" => {
+            let mut r = Response::new(full(r#"{"ok":true,"proxy":"WireCraft"}"#));
             r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
             Some(r)
         }
-        "xwire.cert" | "xwire.ssl" => Some(cert_download(sh, "pem")),
+        "wirecraft.cert" | "wirecraft.ssl" => Some(cert_download(sh, "pem")),
         _ => None,
     }
 }
 
 fn cert_download(sh: &Shared, kind: &str) -> Response<RespBody> {
     let (body, ct, name): (Bytes, &str, &str) = match kind {
-        "der" => (Bytes::copy_from_slice(sh.ca.der()), "application/x-x509-ca-cert", "xwire-root.der"),
-        _ => (Bytes::from(sh.ca.pem().to_string()), "application/x-x509-ca-cert", "xwire-root.pem"),
+        "der" => (Bytes::copy_from_slice(sh.ca.der()), "application/x-x509-ca-cert", "wirecraft-root.der"),
+        _ => (Bytes::from(sh.ca.pem().to_string()), "application/x-x509-ca-cert", "wirecraft-root.pem"),
     };
     let mut r = Response::new(full(body));
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
@@ -1320,10 +1484,10 @@ fn local_page<B>(sh: &Shared, req: &Request<B>) -> Response<RespBody> {
         _ => {}
     }
     let html = format!(
-        "<!doctype html><meta name=viewport content='width=device-width'><title>xwire</title>\
+        "<!doctype html><meta name=viewport content='width=device-width'><title>WireCraft</title>\
          <body style='font:16px system-ui;background:#0a0c0f;color:#e6e9ee;padding:32px;max-width:560px;margin:auto'>\
-         <h2>xwire is running</h2><p>This device is talking to the xwire proxy at <code>{}</code>.</p>\
-         <p><a style='color:#8b93ff' href='/cert.pem'>Download the xwire root certificate (.pem)</a><br>\
+         <h2>WireCraft is running</h2><p>This device is talking to the WireCraft proxy at <code>{}</code>.</p>\
+         <p><a style='color:#8b93ff' href='/cert.pem'>Download the WireCraft root certificate (.pem)</a><br>\
          <a style='color:#8b93ff' href='/cert.der'>Download as .crt (DER, Android)</a></p>\
          <p style='color:#a1aab6'>Fingerprint (SHA-256): <code style='word-break:break-all'>{}</code></p></body>",
         sh.local,

@@ -42,7 +42,7 @@ export interface WsMessage {
   truncated: boolean;
 }
 
-// ---- rules (crates/xwire-core/src/rules.rs)
+// ---- rules (crates/wirecraft-core/src/rules.rs)
 export interface Matcher {
   url: string;
   methods: string[];
@@ -100,6 +100,24 @@ export interface Throttle {
   uploadKbps: number;
   hosts: string[];
 }
+export interface Script {
+  id: string;
+  enabled: boolean;
+  name: string;
+  match: Matcher;
+  request: boolean;
+  response: boolean;
+  code: string;
+  timeoutMs: number;
+}
+export interface ScriptLog {
+  seq: number;
+  at: number;
+  flowId: number | null;
+  script: string;
+  level: "log" | "info" | "warn" | "error" | "debug";
+  message: string;
+}
 export interface Rules {
   mapLocal: MapLocal[];
   mapRemote: MapRemote[];
@@ -107,6 +125,8 @@ export interface Rules {
   breakpoints: Breakpoint[];
   block: Block[];
   throttle: Throttle;
+  scripts: Script[];
+  scriptsOn: boolean;
   mapLocalOn: boolean;
   mapRemoteOn: boolean;
   rewriteOn: boolean;
@@ -145,6 +165,34 @@ export interface BodyView {
   truncated: boolean;
   clipped: boolean;
   decodeError: string | null;
+  /** Schemaless protobuf decode for gRPC / gRPC-Web / protobuf bodies. */
+  grpc: GrpcBody | null;
+}
+
+export interface PbField {
+  no: number;
+  wire: "varint" | "fixed64" | "fixed32" | "len";
+  type?: "message" | "string" | "bytes";
+  value: number | string | PbField[];
+  size?: number;
+  sint?: number;
+  int64?: number;
+  double?: number;
+  float?: number;
+  packed?: number[];
+}
+export interface GrpcMessage {
+  compressed?: boolean;
+  size?: number;
+  fields?: PbField[];
+  error?: string;
+  hex?: string;
+}
+export interface GrpcBody {
+  kind: "grpc" | "grpc-web" | "grpc-web-text" | "protobuf";
+  messages?: GrpcMessage[];
+  trailers?: Record<string, string>;
+  error?: string;
 }
 
 export interface Timing {
@@ -170,6 +218,7 @@ export interface FlowDetail {
   respHttpVersion: string | null;
   respHeaders: Headers;
   respBody: BodyView;
+  respTrailers: Headers;
   timing: Timing;
   tls: TlsInfo | null;
 }
@@ -281,6 +330,10 @@ export const api = {
   resumeAll: () => invoke<void>("resume_all"),
   wsMessages: (id: number) => invoke<WsMessage[]>("ws_messages", { id }),
   importHar: (path: string) => invoke<number>("import_har", { path }),
+  scriptLogs: (after: number) => invoke<ScriptLog[]>("script_logs", { after }),
+  clearScriptLogs: () => invoke<void>("clear_script_logs"),
+  checkScript: (code: string) => invoke<string[]>("check_script", { code }),
+  resetScriptState: (id: string | null) => invoke<void>("reset_script_state", { id }),
   listSessions: () => invoke<SessionFile[]>("list_sessions"),
   saveSession: (name: string, ids?: number[]) => invoke<SessionFile>("save_session", { name, ids: ids ?? null }),
   deleteSession: (path: string) => invoke<void>("delete_session", { path }),

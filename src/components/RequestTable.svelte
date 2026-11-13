@@ -159,7 +159,7 @@
             {#if c.key === "idx"}
               <span class="td right mono t3">
                 {#if f.state === "paused" || f.applied?.includes("Breakpoint")}<Icon name="breakpoint" size={11} color="var(--warning-default)" />{/if}
-                {#if f.applied?.some((a) => a !== "Breakpoint")}<span title={f.applied.join(", ")}><Icon name={f.applied.includes("Map Local") ? "map" : f.applied.includes("Map Remote") ? "remote" : f.applied.includes("Throttle") && f.applied.length === 1 ? "throttle" : f.applied.includes("Blocked") ? "x" : "rewrite"} size={11} color="var(--accent-text)" /></span>{/if}
+                {#if f.applied?.some((a) => a !== "Breakpoint")}<span title={f.applied.join(", ") + (f.applied.includes("Script error") && f.note ? ` — ${f.note}` : "")}><Icon name={f.applied.includes("Map Local") ? "map" : f.applied.includes("Map Remote") ? "remote" : f.applied.includes("Throttle") && f.applied.length === 1 ? "throttle" : f.applied.includes("Blocked") ? "x" : f.applied.some((a) => a.startsWith("Script")) ? "code" : "rewrite"} size={11} color={f.applied.includes("Script error") ? "var(--warning-default)" : "var(--accent-text)"} /></span>{/if}
                 {#if pinned}<Icon name="pin" size={11} color="var(--accent-text)" />{/if}{f.id}
               </span>
             {:else if c.key === "tls"}
