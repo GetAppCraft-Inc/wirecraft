@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/app-icon/hicolor/256x256/apps/dev.wirecraft.app.png" width="128" height="128" alt="WireCraft icon: an engraved owl perched on a wire, on a periwinkle tile">
+  <img src="assets/app-icon/hicolor/256x256/apps/dev.wirecraft.app.png" width="128" height="128" alt="WireCraft icon: an engraved octopus gripping a wire, on a periwinkle tile">
 </p>
 
 <h1 align="center">WireCraft</h1>

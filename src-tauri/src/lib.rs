@@ -805,9 +805,13 @@ fn backdrop(theme: &str) -> tauri::window::Color {
     if theme == "light" { tauri::window::Color(0xe9, 0xec, 0xf0, 0xff) } else { tauri::window::Color(0x0a, 0x0c, 0x0f, 0xff) }
 }
 
-/// When the splash appeared, so it stays up long enough to be read rather than flicker.
+/// When the splash window opened, and when its page had actually drawn (it reports that itself), so it stays
+/// up long enough to be read rather than flicker.
 static SPLASH_SHOWN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static SPLASH_PAINTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 const SPLASH_MIN: Duration = Duration::from_millis(900);
+/// Never hold a ready interface back longer than this waiting for the splash page to draw.
+const SPLASH_PAINT_WAIT: Duration = Duration::from_millis(2500);
 /// Show the main window anyway if the interface never reports ready (it then shows its own error).
 const SPLASH_MAX: Duration = Duration::from_secs(12);
 
@@ -847,12 +851,22 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-/// The interface finished loading.
+/// The splash page has drawn its first frame.
+#[tauri::command]
+fn splash_painted() {
+    let _ = SPLASH_PAINTED.set(std::time::Instant::now());
+}
+
+/// The interface finished loading: swap the splash for it once the splash has been visible for SPLASH_MIN.
 #[tauri::command]
 async fn app_ready(handle: AppHandle) {
-    if let Some(at) = SPLASH_SHOWN.get() {
-        let left = SPLASH_MIN.saturating_sub(at.elapsed());
-        tokio::time::sleep(left).await;
+    if let Some(opened) = SPLASH_SHOWN.get() {
+        while SPLASH_PAINTED.get().is_none() && opened.elapsed() < SPLASH_PAINT_WAIT {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        if let Some(painted) = SPLASH_PAINTED.get() {
+            tokio::time::sleep(SPLASH_MIN.saturating_sub(painted.elapsed())).await;
+        }
     }
     show_main(&handle);
 }
@@ -988,6 +1002,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_ready,
+            splash_painted,
             set_window_theme,
             log_path,
 

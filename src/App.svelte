@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { app } from "./lib/state.svelte";
   import { api, errMsg } from "./lib/api";
   import { copyFlowAs, exportHar } from "./lib/actions";
@@ -29,8 +29,9 @@
       .init()
       .then(() => tools.init())
       .catch((e) => (fatal = errMsg(e)))
-      // close the splash once the first real frame (workspace, onboarding or the error) is ready
-      .finally(() => requestAnimationFrame(() => api.appReady().catch(() => {})));
+      // the window is still hidden here, and hidden webviews don't run animation frames: wait for Svelte to
+      // render the first screen (workspace, onboarding or the error), then let the app swap the splash for it
+      .finally(() => tick().then(() => api.appReady().catch(() => {})));
     // keep stray promise rejections out of the user's way but visible in devtools
     const onRejection = (e: PromiseRejectionEvent) => console.error("unhandled rejection:", e.reason);
     window.addEventListener("unhandledrejection", onRejection);

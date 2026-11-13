@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The app icon (an engraved owl on a wire, assets/app-icon) at UI sizes, with the wordmark.
+  // The app icon (an engraved octopus gripping a wire, assets/app-icon) at UI sizes, with the wordmark.
   import icon from "../../assets/app-icon/wirecraft-small.svg?url";
 
   let { size = 18, wordmark = true }: { size?: number; wordmark?: boolean } = $props();

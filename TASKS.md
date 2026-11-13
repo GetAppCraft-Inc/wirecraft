@@ -84,7 +84,7 @@ Stack (user-chosen 2026-11-11): **Tauri 2 + Svelte 5/TS UI** over a **Rust MITM 
   `wirecraft-root.*`. `wirecraft_core::paths` moves an existing `<data|config>/xwire` folder to `wirecraft` once,
   and `ca.rs` renames legacy `xwire-root.*` files, so an already-trusted CA keeps working. `design/` (figcraft
   source and renders) still says xwire.
-- Logo: engraved owl on a wire, periwinkle tile (`scripts/gen-logo.py` → `assets/app-icon/*.svg` + hicolor PNGs;
+- Logo: engraved octopus gripping a wire, periwinkle tile (owl dropped: FilmCraft uses one) (`scripts/gen-logo.py` → `assets/app-icon/*.svg` + hicolor PNGs;
   Tauri icons via `npx tauri icon`). In-app `Logo.svelte` uses the small variant + "WireCraft" wordmark.
 - Version 0.2.0, single source `[workspace.package]`; `cargo xtask version [set x.y.z]`, `cargo xtask ci`.
 - `.github/workflows/ci.yml`, `release.yml` (push `release` → draft "WireCraft vX" with installers + SHA256SUMS,
