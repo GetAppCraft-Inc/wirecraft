@@ -98,11 +98,20 @@ pub struct ProxyOptions {
     pub intercept: InterceptConfig,
     /// Bodies larger than this are forwarded in full but only this much is kept for inspection.
     pub body_cap: usize,
+    /// Shared with the app so rules survive proxy restarts.
+    pub rules: crate::rules::SharedRules,
+    pub breaks: Arc<crate::rules::Breaks>,
 }
 
 impl Default for ProxyOptions {
     fn default() -> Self {
-        Self { listen: "127.0.0.1:9090".parse().unwrap(), intercept: InterceptConfig::default(), body_cap: 16 << 20 }
+        Self {
+            listen: "127.0.0.1:9090".parse().unwrap(),
+            intercept: InterceptConfig::default(),
+            body_cap: 16 << 20,
+            rules: Default::default(),
+            breaks: Default::default(),
+        }
     }
 }
 
@@ -116,6 +125,8 @@ struct Shared {
     body_cap: usize,
     local: SocketAddr,
     requests: AtomicU64,
+    rules: crate::rules::SharedRules,
+    breaks: Arc<crate::rules::Breaks>,
 }
 
 pub struct Proxy {
@@ -182,6 +193,8 @@ impl Proxy {
             body_cap: opts.body_cap,
             local,
             requests: AtomicU64::new(0),
+            rules: opts.rules,
+            breaks: opts.breaks,
         });
         let (stop, mut stopped) = oneshot::channel();
         let sh = shared.clone();
@@ -237,39 +250,55 @@ impl Proxy {
     }
 
     /// Send a captured request again. The new exchange is recorded as its own flow; returns its id.
-    pub async fn replay(&self, id: u64) -> Result<u64> {
+    pub fn replay(&self, id: u64) -> Result<u64> {
         let f = self.shared.store.get(id).ok_or_else(|| anyhow::anyhow!("flow {id} no longer exists"))?;
-        let mut headers = HeaderMap::new();
-        for (k, v) in &f.req_headers {
-            if k.starts_with(':') {
-                continue;
-            }
-            if let (Ok(k), Ok(v)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
-                headers.append(k, v);
-            }
-        }
         let s = &f.summary;
-        let out = Outgoing {
-            method: Method::from_bytes(s.method.as_bytes())?,
-            scheme: if s.scheme == "https" { "https" } else { "http" },
-            host: s.host.clone(),
-            port: s.port,
-            path: s.path.clone(),
-            version: s.http_version.clone(),
-            headers,
-            body: f.req_body.clone(),
-            client: Some("xwire · repeat".into()),
+        let default = if s.scheme == "https" { 443 } else { 80 };
+        let auth = if s.port == default { s.host.clone() } else { format!("{}:{}", s.host, s.port) };
+        let url = format!("{}://{}{}", s.scheme, auth, s.path);
+        self.send(&s.method, &url, &f.req_headers, f.req_body.clone(), "xwire · repeat")
+    }
+
+    /// Send a new request through the proxy pipeline (rules apply). Returns the new flow id immediately; the
+    /// exchange continues in the background.
+    pub fn send(&self, method: &str, url: &str, headers: &Headers, body: Bytes, client: &str) -> Result<u64> {
+        let method = Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())?;
+        let mut out = Outgoing {
+            method,
+            scheme: "http",
+            host: String::new(),
+            port: 80,
+            path: "/".into(),
+            version: "HTTP/1.1".into(),
+            headers: headers_from_list(headers),
+            body,
+            client: Some(client.to_string()),
             client_addr: "xwire".into(),
-            tls: f.tls.clone(),
+            tls: None,
             started: Instant::now(),
             started_unix: now_ms(),
             request_ms: 0.0,
         };
+        retarget(&mut out, url.trim()).map_err(|e| anyhow::anyhow!(e))?;
+        if !out.body.is_empty() || out.headers.contains_key(header::CONTENT_LENGTH) {
+            out.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(out.body.len()));
+        }
         let new_id = self.shared.store.next_id();
-        let resp = exchange(self.shared.clone(), out, None, Some(new_id)).await;
-        // drain so the tee records the body and closes the flow
-        let _ = resp.into_body().collect().await;
+        let sh = self.shared.clone();
+        tokio::spawn(async move {
+            let resp = exchange(sh, out, None, Some(new_id)).await;
+            // drain so the tee records the body and closes the flow
+            let _ = resp.into_body().collect().await;
+        });
         Ok(new_id)
+    }
+
+    pub fn rules(&self) -> Arc<crate::rules::Rules> {
+        self.shared.rules.read().clone()
+    }
+
+    pub fn breaks(&self) -> &Arc<crate::rules::Breaks> {
+        &self.shared.breaks
     }
 }
 
@@ -398,6 +427,8 @@ fn tunnel_flow(sh: &Shared, conn: &Conn, host: &str, port: u16, ua: Option<&str>
             note: Some("tunnelled".into()),
             req_header_count: 0,
             resp_header_count: 0,
+            applied: vec![],
+            ws_messages: 0,
         },
         req_headers: vec![("host".into(), format!("{host}:{port}"))],
         req_body: Bytes::new(),
@@ -409,6 +440,7 @@ fn tunnel_flow(sh: &Shared, conn: &Conn, host: &str, port: u16, ua: Option<&str>
         resp_body_truncated: false,
         timing: Timing { started, ..Default::default() },
         tls: None,
+        ws: vec![],
     });
     Some(id)
 }
@@ -684,26 +716,124 @@ fn display_url(o: &Outgoing) -> String {
     }
 }
 
-/// Record the request, forward it upstream, and return the response for the client (body tee'd into the store).
-async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrade::OnUpgrade>, id: Option<u64>) -> Response<RespBody> {
+fn headers_from_list(list: &Headers) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    for (k, v) in list {
+        if k.starts_with(':') {
+            continue;
+        }
+        if let (Ok(k), Ok(v)) = (HeaderName::from_bytes(k.trim().as_bytes()), HeaderValue::from_str(v)) {
+            h.append(k, v);
+        }
+    }
+    h
+}
+
+/// Point `o` at a new absolute URL.
+fn retarget(o: &mut Outgoing, url: &str) -> Result<(), String> {
+    let uri: Uri = url.parse().map_err(|e| format!("invalid URL {url}: {e}"))?;
+    let https = match uri.scheme_str() {
+        Some(s) if s.eq_ignore_ascii_case("https") => true,
+        Some(s) if s.eq_ignore_ascii_case("http") => false,
+        _ => return Err(format!("URL must start with http:// or https://: {url}")),
+    };
+    let auth = uri.authority().ok_or_else(|| format!("URL has no host: {url}"))?;
+    let (h, p) = split_host_port(auth.as_str(), if https { 443 } else { 80 });
+    o.scheme = if https { "https" } else { "http" };
+    o.host = h;
+    o.port = p;
+    o.path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    Ok(())
+}
+
+fn record_request(sh: &Shared, id: u64, o: &Outgoing) {
+    let mut req_headers = Vec::new();
+    if o.version == "h2" {
+        req_headers.push((":method".into(), o.method.to_string()));
+        req_headers.push((":scheme".into(), o.scheme.to_string()));
+        req_headers.push((":authority".into(), o.host.clone()));
+        req_headers.push((":path".into(), o.path.clone()));
+    }
+    req_headers.extend(header_list(&o.headers));
+    let cap = sh.body_cap;
+    let truncated = o.body.len() > cap;
+    let body = if truncated { o.body.slice(..cap) } else { o.body.clone() };
+    let n = req_headers.len();
+    let (m, sc, host, port, path) = (o.method.to_string(), o.scheme, o.host.clone(), o.port, o.path.clone());
+    let len = o.body.len() as u64;
+    sh.store.update(id, |f| {
+        f.summary.method = m;
+        f.summary.scheme = sc.into();
+        f.summary.tls = sc == "https";
+        f.summary.host = host;
+        f.summary.port = port;
+        f.summary.path = path;
+        f.summary.req_size = len;
+        f.summary.req_header_count = n;
+        f.req_headers = req_headers;
+        f.req_body = body;
+        f.req_body_truncated = truncated;
+    });
+}
+
+fn mark(sh: &Shared, id: Option<u64>, label: &str, note: Option<String>) {
+    if let Some(id) = id {
+        let label = label.to_string();
+        sh.store.update(id, |f| {
+            if !f.summary.applied.contains(&label) {
+                f.summary.applied.push(label);
+            }
+            if note.is_some() {
+                f.summary.note = note;
+            }
+        });
+    }
+}
+
+const RULE_BODY_CAP: usize = 32 << 20;
+
+/// Record the request, run it through the rules, forward it upstream (or answer it locally) and return the
+/// response for the client (body tee'd into the store).
+async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::upgrade::OnUpgrade>, id: Option<u64>) -> Response<RespBody> {
     sh.requests.fetch_add(1, Ordering::Relaxed);
-    let url = display_url(&o);
+    let rules = sh.rules.read().clone();
+    let original_url = display_url(&o);
+    let original_method = o.method.to_string();
     let req_ct = o.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     let is_upgrade = on_upgrade.is_some();
     let xhr = o.headers.get("sec-fetch-dest").map(|v| v.as_bytes() == b"empty").unwrap_or(false)
         || o.headers.contains_key("x-requested-with");
+    let rewrites: Vec<crate::rules::Rewrite> = rules.rewrites_for(&original_method, &original_url).cloned().collect();
+
+    // ---- request-side rewrites
+    let mut rewrote = false;
+    for r in rewrites.iter().filter(|r| !r.target.is_response()) {
+        use crate::rules::RewriteTarget as T;
+        match r.target {
+            T::Url | T::QueryParam => {
+                let u = r.apply_url(&display_url(&o));
+                if retarget(&mut o, &u).is_ok() {
+                    rewrote = true;
+                }
+            }
+            T::RequestHeader => {
+                let mut list = header_list(&o.headers);
+                r.apply_headers(&mut list);
+                o.headers = headers_from_list(&list);
+                rewrote = true;
+            }
+            T::RequestBody => {
+                o.body = Bytes::from(r.apply_body(&o.body));
+                if o.headers.contains_key(header::CONTENT_LENGTH) {
+                    o.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(o.body.len()));
+                }
+                rewrote = true;
+            }
+            _ => {}
+        }
+    }
 
     if let Some(id) = id {
-        let mut req_headers = Vec::new();
-        if o.version == "h2" {
-            req_headers.push((":method".into(), o.method.to_string()));
-            req_headers.push((":scheme".into(), o.scheme.to_string()));
-            req_headers.push((":authority".into(), o.host.clone()));
-            req_headers.push((":path".into(), o.path.clone()));
-        }
-        req_headers.extend(header_list(&o.headers));
-        let cap = sh.body_cap;
-        let truncated = o.body.len() > cap;
         sh.store.insert(Flow {
             summary: FlowSummary {
                 id,
@@ -717,7 +847,7 @@ async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrad
                 state: FlowState::Pending,
                 kind: classify(o.method.as_str(), &o.path, req_ct.as_deref(), None, is_upgrade).into(),
                 content_type: None,
-                req_size: o.body.len() as u64,
+                req_size: 0,
                 resp_size: 0,
                 started: o.started_unix,
                 duration_ms: None,
@@ -727,12 +857,14 @@ async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrad
                 xhr,
                 error: None,
                 note: None,
-                req_header_count: req_headers.len(),
+                req_header_count: 0,
                 resp_header_count: 0,
+                applied: if rewrote { vec!["Rewrite".into()] } else { vec![] },
+                ws_messages: 0,
             },
-            req_headers,
-            req_body: if truncated { o.body.slice(..cap) } else { o.body.clone() },
-            req_body_truncated: truncated,
+            req_headers: vec![],
+            req_body: Bytes::new(),
+            req_body_truncated: false,
             status_text: None,
             resp_http_version: None,
             resp_headers: vec![],
@@ -740,16 +872,118 @@ async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrad
             resp_body_truncated: false,
             timing: Timing { started: o.started_unix, request_ms: Some(o.request_ms), ..Default::default() },
             tls: o.tls.clone(),
+            ws: vec![],
         });
+        record_request(&sh, id, &o);
     }
 
-    // Build the upstream request.
+    // ---- block
+    if rules.blocked(&original_method, &original_url) {
+        mark(&sh, id, "Blocked", Some("blocked".into()));
+        let mut r = text_response(StatusCode::FORBIDDEN, "Blocked by xwire\n");
+        r.headers_mut().insert("x-xwire-blocked", HeaderValue::from_static("1"));
+        return finish_local(&sh, id, &o, r);
+    }
+
+    // ---- request breakpoint
+    if let (Some(fid), Some(_)) = (id, rules.breakpoint_for(&original_method, &original_url, false)) {
+        let paused = crate::rules::Paused {
+            flow_id: fid,
+            phase: "request",
+            method: o.method.to_string(),
+            url: display_url(&o),
+            status: None,
+            headers: header_list(&o.headers),
+            body: String::from_utf8_lossy(&o.body).into_owned(),
+            binary: std::str::from_utf8(&o.body).is_err(),
+        };
+        let rx = sh.breaks.pause(paused);
+        sh.store.update(fid, |f| {
+            f.summary.state = FlowState::Paused;
+            f.summary.note = Some("paused · request".into());
+        });
+        let r = rx.await.unwrap_or_default();
+        sh.store.update(fid, |f| {
+            f.summary.state = FlowState::Pending;
+            f.summary.note = None;
+        });
+        mark(&sh, id, "Breakpoint", None);
+        if r.abort {
+            return fail(&sh, id, &o, StatusCode::BAD_GATEWAY, "aborted at a request breakpoint".into());
+        }
+        if let Some(m) = r.method.as_deref().filter(|m| !m.trim().is_empty()) {
+            if let Ok(m) = Method::from_bytes(m.trim().to_ascii_uppercase().as_bytes()) {
+                o.method = m;
+            }
+        }
+        if let Some(u) = r.url.as_deref().filter(|u| !u.trim().is_empty()) {
+            if let Err(e) = retarget(&mut o, u.trim()) {
+                return fail(&sh, id, &o, StatusCode::BAD_REQUEST, e);
+            }
+        }
+        if let Some(h) = &r.headers {
+            o.headers = headers_from_list(h);
+        }
+        if let Some(b) = r.body {
+            o.body = Bytes::from(b);
+            if o.headers.contains_key(header::CONTENT_LENGTH) || !o.body.is_empty() {
+                o.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(o.body.len()));
+            }
+        }
+        record_request(&sh, fid, &o);
+    }
+    o.started = o.started.max(Instant::now() - Duration::from_millis(o.request_ms as u64));
+
+    // ---- map local
+    if let Some(ml) = rules.map_local_for(&original_method, &original_url).cloned() {
+        let body = if ml.file.trim().is_empty() {
+            Ok(Bytes::from(ml.body.clone()))
+        } else {
+            tokio::fs::read(ml.file.trim()).await.map(Bytes::from).map_err(|e| format!("Map Local file {}: {e}", ml.file))
+        };
+        let body = match body {
+            Ok(b) => b,
+            Err(e) => return fail(&sh, id, &o, StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        let mut r = Response::new(full(body.clone()));
+        *r.status_mut() = StatusCode::from_u16(ml.status).unwrap_or(StatusCode::OK);
+        *r.headers_mut() = headers_from_list(&ml.headers);
+        r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+        r.headers_mut().insert("x-xwire-map-local", HeaderValue::from_static("1"));
+        let label = if ml.name.trim().is_empty() { "Map Local".to_string() } else { format!("Map Local · {}", ml.name.trim()) };
+        mark(&sh, id, "Map Local", Some(label));
+        return respond(sh, o, id, r, None, None, rules, rewrites, req_ct, 0.0).await;
+    }
+
+    // ---- map remote
+    if let Some(mr) = rules.map_remote_for(&original_method, &original_url) {
+        if let Some(u) = crate::rules::map_remote_url(mr, &display_url(&o)) {
+            if let Err(e) = retarget(&mut o, &u) {
+                return fail(&sh, id, &o, StatusCode::BAD_REQUEST, e);
+            }
+            mark(&sh, id, "Map Remote", Some(format!("→ {u}")));
+        }
+    }
+
+    // ---- throttle (latency + upload)
+    let throttle = rules.throttle.applies(&o.host).then(|| rules.throttle.clone());
+    if let Some(t) = &throttle {
+        mark(&sh, id, "Throttle", None);
+        tokio::time::sleep(crate::rules::upload_delay(t, o.body.len())).await;
+    }
+
+    // ---- upstream
+    let url = display_url(&o);
     let uri: Uri = match url.parse() {
         Ok(u) => u,
         Err(e) => return fail(&sh, id, &o, StatusCode::BAD_REQUEST, format!("invalid URL {url}: {e}")),
     };
     let mut headers = o.headers.clone();
     strip_hop_by_hop(&mut headers, is_upgrade);
+    if is_upgrade {
+        // keep WebSocket payloads readable: no permessage-deflate
+        headers.remove("sec-websocket-extensions");
+    }
     // HTTP/2 clients may split cookies across several headers; HTTP/1 servers expect one.
     let cookies: Vec<String> =
         headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).map(|s| s.to_string()).collect();
@@ -784,18 +1018,142 @@ async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrad
         Err(_) => return fail(&sh, id, &o, StatusCode::GATEWAY_TIMEOUT, "upstream did not respond within 300 s".into()),
     };
     let waiting_ms = sent_at.elapsed().as_secs_f64() * 1000.0;
-    let status = resp.status();
-    let server_up = (status == StatusCode::SWITCHING_PROTOCOLS && on_upgrade.is_some()).then(|| hyper::upgrade::on(&mut resp));
-    let (mut parts, body) = resp.into_parts();
-    let resp_ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let server_up = (resp.status() == StatusCode::SWITCHING_PROTOCOLS && on_upgrade.is_some()).then(|| hyper::upgrade::on(&mut resp));
+    let resp = resp.map(|b| b.map_err(|e| Box::new(e) as BoxError).boxed_unsync());
+    let upgrade = match (on_upgrade, server_up) {
+        (Some(c), Some(s)) => Some((c, s)),
+        _ => None,
+    };
+    respond(sh, o, id, resp, upgrade, throttle, rules, rewrites, req_ct, waiting_ms).await
+}
 
+/// A response produced by xwire itself (blocked): record it and send it.
+fn finish_local(sh: &Shared, id: Option<u64>, o: &Outgoing, r: Response<RespBody>) -> Response<RespBody> {
+    if let Some(id) = id {
+        let status = r.status();
+        let headers = header_list(r.headers());
+        let ms = o.started.elapsed().as_secs_f64() * 1000.0;
+        sh.store.update(id, |f| {
+            f.summary.status = Some(status.as_u16());
+            f.summary.state = FlowState::Complete;
+            f.summary.duration_ms = Some(ms);
+            f.summary.resp_header_count = headers.len();
+            f.status_text = status.canonical_reason().map(|s| s.to_string());
+            f.resp_headers = headers;
+            f.resp_body = Bytes::from_static(b"Blocked by xwire\n");
+            f.summary.resp_size = f.resp_body.len() as u64;
+            f.timing.total_ms = Some(ms);
+        });
+    }
+    r
+}
+
+/// Response phase: response rules, breakpoint, recording, throttling, upgrades.
+#[allow(clippy::too_many_arguments)]
+async fn respond(
+    sh: Arc<Shared>,
+    o: Outgoing,
+    id: Option<u64>,
+    resp: Response<RespBody>,
+    upgrade: Option<(hyper::upgrade::OnUpgrade, hyper::upgrade::OnUpgrade)>,
+    throttle: Option<crate::rules::Throttle>,
+    rules: Arc<crate::rules::Rules>,
+    rewrites: Vec<crate::rules::Rewrite>,
+    req_ct: Option<String>,
+    waiting_ms: f64,
+) -> Response<RespBody> {
+    let (mut parts, mut body) = resp.into_parts();
+    let url = display_url(&o);
+    let method = o.method.to_string();
+
+    // ---- response rewrites and breakpoint need the whole body
+    let resp_rewrites: Vec<crate::rules::Rewrite> = rewrites.into_iter().filter(|r| r.target.is_response()).collect();
+    let bp = id.is_some() && rules.breakpoint_for(&method, &url, true).is_some();
+    drop(rules);
+    if upgrade.is_none() && (!resp_rewrites.is_empty() || bp) {
+        let bytes = match crate::rules::collect_capped(body, RULE_BODY_CAP).await {
+            Ok(Some(b)) => b,
+            Ok(None) => return fail(&sh, id, &o, StatusCode::BAD_GATEWAY, "response too large for rewrite / breakpoint (32 MB)".into()),
+            Err(e) => return fail(&sh, id, &o, StatusCode::BAD_GATEWAY, format!("reading response: {e}")),
+        };
+        // work on the decoded body so text edits make sense
+        let enc = parts.headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let mut data = match &enc {
+            Some(e) => match decode(&bytes, Some(e)) {
+                Ok(d) => {
+                    parts.headers.remove(header::CONTENT_ENCODING);
+                    d
+                }
+                Err(_) => bytes.to_vec(),
+            },
+            None => bytes.to_vec(),
+        };
+        let mut status = parts.status.as_u16();
+        let mut hl = header_list(&parts.headers);
+        for r in &resp_rewrites {
+            use crate::rules::RewriteTarget as T;
+            match r.target {
+                T::Status => status = r.apply_status(status),
+                T::ResponseHeader => r.apply_headers(&mut hl),
+                T::ResponseBody => data = r.apply_body(&data),
+                _ => {}
+            }
+        }
+        if !resp_rewrites.is_empty() {
+            mark(&sh, id, "Rewrite", None);
+        }
+        if let (Some(fid), true) = (id, bp) {
+            let paused = crate::rules::Paused {
+                flow_id: fid,
+                phase: "response",
+                method: method.clone(),
+                url: url.clone(),
+                status: Some(status),
+                headers: hl.clone(),
+                body: String::from_utf8_lossy(&data).into_owned(),
+                binary: std::str::from_utf8(&data).is_err(),
+            };
+            let rx = sh.breaks.pause(paused);
+            sh.store.update(fid, |f| {
+                f.summary.state = FlowState::Paused;
+                f.summary.status = Some(status);
+                f.summary.note = Some("paused · response".into());
+            });
+            let r = rx.await.unwrap_or_default();
+            sh.store.update(fid, |f| {
+                f.summary.state = FlowState::Pending;
+                f.summary.note = None;
+            });
+            mark(&sh, id, "Breakpoint", None);
+            if r.abort {
+                return fail(&sh, id, &o, StatusCode::BAD_GATEWAY, "aborted at a response breakpoint".into());
+            }
+            if let Some(s) = r.status {
+                status = s;
+            }
+            if let Some(h) = r.headers {
+                hl = h;
+            }
+            if let Some(b) = r.body {
+                data = b.into_bytes();
+            }
+        }
+        parts.status = StatusCode::from_u16(status).unwrap_or(parts.status);
+        parts.headers = headers_from_list(&hl);
+        parts.headers.remove(header::TRANSFER_ENCODING);
+        parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(data.len()));
+        body = full(data);
+    }
+
+    let status = parts.status;
+    let resp_ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     if let Some(id) = id {
         let mut resp_headers = Vec::new();
         if parts.version == Version::HTTP_2 {
             resp_headers.push((":status".into(), status.as_u16().to_string()));
         }
         resp_headers.extend(header_list(&parts.headers));
-        let kind = classify(o.method.as_str(), &o.path, req_ct.as_deref(), resp_ct.as_deref(), is_upgrade && status == StatusCode::SWITCHING_PROTOCOLS);
+        let kind = classify(o.method.as_str(), &o.path, req_ct.as_deref(), resp_ct.as_deref(), upgrade.is_some() && status == StatusCode::SWITCHING_PROTOCOLS);
         let rv = version_str(parts.version).to_string();
         sh.store.update(id, |f| {
             f.summary.status = Some(status.as_u16());
@@ -809,50 +1167,80 @@ async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrad
         });
     }
 
-    // WebSocket and other upgrades: splice the two upgraded connections together.
-    if let (Some(client_up), Some(server_up)) = (on_upgrade, server_up) {
-        {
-            let sh2 = sh.clone();
-            let started = o.started;
-            if let Some(id) = id {
-                sh.store.update(id, |f| {
-                    f.summary.state = FlowState::Live;
-                    f.summary.note = Some("live".into());
-                });
-            }
-            tokio::spawn(async move {
-                let res = async {
-                    let (c, s) = tokio::try_join!(client_up, server_up)?;
-                    let (mut c, mut s) = (TokioIo::new(c), TokioIo::new(s));
+    // WebSocket and other upgrades: splice the two upgraded connections together, capturing WS messages.
+    if let Some((client_up, server_up)) = upgrade {
+        let sh2 = sh.clone();
+        let started = o.started;
+        let ws = parts.headers.get(header::UPGRADE).map(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket")).unwrap_or(false);
+        if let Some(id) = id {
+            sh.store.update(id, |f| {
+                f.summary.state = FlowState::Live;
+                f.summary.note = Some("live".into());
+            });
+        }
+        tokio::spawn(async move {
+            let res = async {
+                let (c, s) = tokio::try_join!(client_up, server_up)?;
+                let (c, s) = (TokioIo::new(c), TokioIo::new(s));
+                if let (true, Some(fid)) = (ws, id) {
+                    let (cr, cw) = tokio::io::split(c);
+                    let (sr, sw) = tokio::io::split(s);
+                    let rec = |sh: Arc<Shared>| {
+                        move |msgs: Vec<crate::store::WsMessage>| {
+                            sh.store.update(fid, |f| {
+                                f.summary.ws_messages += msgs.len() as u64;
+                                f.summary.note = Some(format!("{} messages", f.summary.ws_messages));
+                                for m in msgs {
+                                    if f.ws.len() < crate::ws::MAX_MESSAGES {
+                                        f.ws.push(m);
+                                    }
+                                }
+                            });
+                        }
+                    };
+                    let up = crate::ws::pump(cr, sw, crate::ws::Parser::new(true), rec(sh2.clone()));
+                    let down = crate::ws::pump(sr, cw, crate::ws::Parser::new(false), rec(sh2.clone()));
+                    let (u, d) = tokio::join!(up, down);
+                    // one side closing ends the other with an error; report what was copied
+                    Ok::<_, BoxError>((u.unwrap_or(0), d.unwrap_or(0)))
+                } else {
+                    let (mut c, mut s) = (c, s);
                     Ok::<_, BoxError>(tokio::io::copy_bidirectional(&mut c, &mut s).await?)
                 }
-                .await;
-                if let Some(id) = id {
-                    let ms = started.elapsed().as_secs_f64() * 1000.0;
-                    sh2.store.update(id, |f| {
-                        f.summary.duration_ms = Some(ms);
-                        f.timing.total_ms = Some(ms);
-                        f.summary.note = None;
-                        match res {
-                            Ok((up, down)) => {
-                                f.summary.req_size = up;
-                                f.summary.resp_size = down;
-                                f.summary.state = FlowState::Complete;
-                            }
-                            Err(e) => {
-                                f.summary.state = FlowState::Complete;
-                                f.summary.error = Some(e.to_string());
+            }
+            .await;
+            if let Some(id) = id {
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                sh2.store.update(id, |f| {
+                    f.summary.duration_ms = Some(ms);
+                    f.timing.total_ms = Some(ms);
+                    f.summary.note = (f.summary.ws_messages > 0).then(|| format!("{} messages", f.summary.ws_messages));
+                    f.summary.state = FlowState::Complete;
+                    match res {
+                        Ok((up, down)) => {
+                            f.summary.req_size = up;
+                            f.summary.resp_size = down;
+                        }
+                        Err(e) => {
+                            let e = e.to_string();
+                            // a close without TLS close_notify is how most WebSocket servers hang up
+                            if !e.contains("close_notify") {
+                                f.summary.error = Some(e);
                             }
                         }
-                    });
-                }
-            });
-            strip_hop_by_hop(&mut parts.headers, true);
-            return Response::from_parts(parts, full(Bytes::new()));
-        }
+                    }
+                });
+            }
+        });
+        strip_hop_by_hop(&mut parts.headers, true);
+        return Response::from_parts(parts, full(Bytes::new()));
     }
 
     strip_hop_by_hop(&mut parts.headers, false);
+    let body: RespBody = match throttle.as_ref().filter(|t| t.download_kbps > 0) {
+        Some(t) => crate::rules::Throttled::new(body, t.download_kbps).boxed_unsync(),
+        None => body,
+    };
     let body: RespBody = match id {
         Some(id) => {
             let sh2 = sh.clone();
@@ -875,10 +1263,9 @@ async fn exchange(sh: Arc<Shared>, o: Outgoing, on_upgrade: Option<hyper::upgrad
                     }
                 });
             })
-            .map_err(|e| Box::new(e) as BoxError)
             .boxed_unsync()
         }
-        None => body.map_err(|e| Box::new(e) as BoxError).boxed_unsync(),
+        None => body,
     };
     Response::from_parts(parts, body)
 }

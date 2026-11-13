@@ -20,7 +20,7 @@ pub struct TeeDone {
 
 pin_project_lite::pin_project! {
     /// Passes frames through unchanged while keeping a copy of the first `cap` bytes.
-    pub struct TeeBody<B> {
+    pub struct TeeBody<B: Body> {
         #[pin]
         inner: B,
         buf: BytesMut,
@@ -31,23 +31,26 @@ pin_project_lite::pin_project! {
         done: Option<Box<dyn FnOnce(TeeDone) + Send + 'static>>,
     }
 
-    impl<B> PinnedDrop for TeeBody<B> {
+    impl<B: Body> PinnedDrop for TeeBody<B> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
+            // Empty bodies (Content-Length: 0, 204, 304, HEAD) report end-of-stream up front, so hyper never
+            // polls them: finishing without being polled is only an error if data was still to come.
+            let ended = this.inner.is_end_stream();
             if let Some(done) = this.done.take() {
                 done(TeeDone {
                     captured: std::mem::take(this.buf).freeze(),
                     truncated: *this.truncated,
                     total: *this.total,
                     elapsed_ms: this.start.elapsed().as_secs_f64() * 1000.0,
-                    error: Some("client closed the connection before the body finished".into()),
+                    error: (!ended).then(|| "client closed the connection before the body finished".to_string()),
                 });
             }
         }
     }
 }
 
-impl<B> TeeBody<B> {
+impl<B: Body> TeeBody<B> {
     pub fn new(inner: B, cap: usize, done: impl FnOnce(TeeDone) + Send + 'static) -> Self {
         Self {
             inner,

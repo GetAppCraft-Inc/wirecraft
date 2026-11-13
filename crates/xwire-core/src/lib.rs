@@ -4,8 +4,11 @@ pub mod body;
 pub mod ca;
 pub mod procinfo;
 pub mod proxy;
+pub mod rules;
+pub mod ws;
 pub mod store;
 
 pub use ca::{CaInfo, CertAuthority};
 pub use proxy::{InterceptConfig, InterceptMode, Proxy, ProxyOptions};
-pub use store::{Flow, FlowState, FlowSummary, Store, StoreEvent};
+pub use rules::{Breaks, Paused, Resume, Rules};
+pub use store::{Flow, FlowState, FlowSummary, Store, StoreEvent, WsMessage};

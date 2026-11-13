@@ -22,6 +22,8 @@ pub enum FlowState {
     Tunnel,
     /// Upgraded connection (WebSocket) that is still open.
     Live,
+    /// Held at a breakpoint, waiting for the user.
+    Paused,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -76,6 +78,12 @@ pub struct FlowSummary {
     pub note: Option<String>,
     pub req_header_count: usize,
     pub resp_header_count: usize,
+    /// Rules that changed this exchange: "Map Local", "Map Remote", "Rewrite", "Breakpoint", "Throttle", "Blocked".
+    #[serde(default)]
+    pub applied: Vec<String>,
+    /// WebSocket messages seen so far.
+    #[serde(default)]
+    pub ws_messages: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +99,23 @@ pub struct Flow {
     pub resp_body_truncated: bool,
     pub timing: Timing,
     pub tls: Option<TlsInfo>,
+    /// WebSocket messages (capped), oldest first.
+    pub ws: Vec<WsMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsMessage {
+    /// Unix epoch, milliseconds.
+    pub at: f64,
+    /// true = client → server
+    pub outgoing: bool,
+    /// text | binary | ping | pong | close
+    pub kind: &'static str,
+    pub len: u64,
+    /// Text payload, or base64 for binary (capped).
+    pub data: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

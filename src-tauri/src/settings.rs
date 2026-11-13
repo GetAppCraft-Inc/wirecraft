@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use xwire_core::InterceptConfig;
+use xwire_core::{InterceptConfig, Rules};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -15,6 +15,8 @@ pub struct Settings {
     pub system_proxy_bypass: String,
     pub theme: String,
     pub favourites: Vec<String>,
+    /// Map Local / Map Remote / Rewrite / Breakpoints / Block / Throttle.
+    pub rules: Rules,
 }
 
 impl Default for Settings {
@@ -27,6 +29,7 @@ impl Default for Settings {
             system_proxy_bypass: "localhost, 127.0.0.1, ::1, *.local, 169.254/16".into(),
             theme: "dark".into(),
             favourites: vec![],
+            rules: Rules { map_local_on: true, map_remote_on: true, rewrite_on: true, breakpoints_on: true, ..Default::default() },
         }
     }
 }
