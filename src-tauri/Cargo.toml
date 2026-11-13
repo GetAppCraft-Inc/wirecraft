@@ -31,3 +31,5 @@ bytes = "1"
 dirs = "6"
 time = { version = "0.3", features = ["formatting"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"

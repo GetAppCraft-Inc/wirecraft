@@ -2,7 +2,7 @@
 import { api, errMsg } from "./api";
 import { app } from "./state.svelte";
 import { copyFlowAs, exportHar } from "./actions";
-import type { IconName } from "./icons";
+import type { IconName } from "./icons-extra";
 import { tools } from "./tools.svelte";
 import { importHar } from "./sessions";
 
@@ -60,10 +60,25 @@ export function commands(hooks: { focusFilter: () => void; toggleSidebar: () => 
     { id: "block", title: "Blocked hosts…", icon: "x", run: () => tools.open("block") },
     { id: "throttle", title: "Throttle the network…", icon: "throttle", run: () => tools.open("throttle") },
     { id: "resume", title: "Resume all paused requests", icon: "play", when: () => tools.paused.length > 0, run: () => tools.resumeAll() },
-    { id: "import", title: "Import HAR…", icon: "upload", run: () => importHar() },
+    { id: "import", title: "Import HAR or Charles session…", icon: "upload", run: () => importHar() },
     { id: "har", title: "Export session as HAR…", icon: "download", keys: ["Ctrl", "E"], run: () => exportHar() },
     { id: "sidebar", title: "Toggle sidebar", icon: "sidebar", keys: ["Ctrl", "B"], run: hooks.toggleSidebar },
-    { id: "theme", title: app.settings?.theme === "light" ? "Switch to dark theme" : "Switch to light theme", icon: "eye", run: () => app.setTheme(app.settings?.theme === "light" ? "dark" : "light") },
+    { id: "theme-system", title: "Theme: follow the system", icon: "contrast", when: () => app.settings?.theme !== "system", run: () => app.setTheme("system") },
+    { id: "theme-dark", title: "Theme: dark", icon: "moon", when: () => app.settings?.theme !== "dark", run: () => app.setTheme("dark") },
+    { id: "theme-light", title: "Theme: light", icon: "sun", when: () => app.settings?.theme !== "light", run: () => app.setTheme("light") },
+    {
+      id: "logs",
+      title: "Open logs folder",
+      icon: "folder",
+      run: async () => {
+        try {
+          const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+          await revealItemInDir(await api.logPath());
+        } catch (e) {
+          app.toast({ kind: "error", title: "Couldn't open the logs folder", body: errMsg(e) });
+        }
+      },
+    },
     {
       id: "sysproxy",
       title: "Toggle system proxy",

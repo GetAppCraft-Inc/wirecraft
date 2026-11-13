@@ -13,10 +13,14 @@ pub struct Settings {
     pub intercept: InterceptConfig,
     pub onboarded: bool,
     pub system_proxy_bypass: String,
+    /// "system" (follow the OS), "dark" or "light".
     pub theme: String,
     pub favourites: Vec<String>,
     /// Map Local / Map Remote / Rewrite / Breakpoints / Block / Throttle.
     pub rules: Rules,
+    /// WireCraft switched the OS proxy on and hasn't switched it off yet. Persisted so that after a crash or a
+    /// kill the next launch still restores it on quit (or at once, if the proxy can't start).
+    pub system_proxy_owned: bool,
 }
 
 impl Default for Settings {
@@ -27,9 +31,10 @@ impl Default for Settings {
             intercept: InterceptConfig::default(),
             onboarded: false,
             system_proxy_bypass: "localhost, 127.0.0.1, ::1, *.local, 169.254/16".into(),
-            theme: "dark".into(),
+            theme: "system".into(),
             favourites: vec![],
             rules: Rules { map_local_on: true, map_remote_on: true, rewrite_on: true, breakpoints_on: true, scripts_on: true, ..Default::default() },
+            system_proxy_owned: false,
         }
     }
 }

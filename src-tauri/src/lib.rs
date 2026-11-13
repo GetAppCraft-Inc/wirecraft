@@ -100,6 +100,34 @@ impl App {
         Stats { flows, bytes, requests_total, recording: self.store.recording() }
     }
 
+    /// Record whether WireCraft is responsible for switching the OS proxy off again.
+    fn own_system_proxy(&self, on: bool) {
+        self.set_system_proxy.store(on, Ordering::Relaxed);
+        let mut s = self.settings.write();
+        if s.system_proxy_owned != on {
+            s.system_proxy_owned = on;
+            s.save();
+        }
+    }
+
+    /// Switch the OS proxy off if WireCraft turned it on (quit, signals, or a proxy that can't start).
+    fn restore_system_proxy(&self) {
+        if !self.set_system_proxy.load(Ordering::Relaxed) {
+            return;
+        }
+        let (port, bypass) = {
+            let s = self.settings.read();
+            (s.port, s.system_proxy_bypass.clone())
+        };
+        match system::set_system_proxy(false, port, &bypass) {
+            Ok(_) => {
+                self.own_system_proxy(false);
+                tracing::info!("system proxy switched off");
+            }
+            Err(e) => tracing::warn!("restoring system proxy: {e}"),
+        }
+    }
+
     fn current_proxy(&self) -> R<Arc<Proxy>> {
         self.proxy.read().clone().ok_or_else(|| "The proxy is not running".to_string())
     }
@@ -560,7 +588,18 @@ async fn restart_proxy(handle: AppHandle, app: State<'_, App>, port: u16, listen
         s.listen_all = listen_all;
         s.save();
     }
-    Ok(app.restart(&handle).await)
+    let st = app.restart(&handle).await;
+    if app.set_system_proxy.load(Ordering::Relaxed) {
+        // the OS proxy still names the old port
+        let on = st.running;
+        let bypass = app.settings.read().system_proxy_bypass.clone();
+        let r = tauri::async_runtime::spawn_blocking(move || system::set_system_proxy(on, port, &bypass)).await.map_err(err)?;
+        match r {
+            Ok(_) => app.own_system_proxy(on),
+            Err(e) => tracing::warn!("re-pointing the system proxy: {e}"),
+        }
+    }
+    Ok(st)
 }
 
 #[tauri::command]
@@ -581,7 +620,7 @@ fn set_prefs(app: State<App>, patch: serde_json::Value) -> R<Settings> {
     if let (Some(obj), Some(p)) = (v.as_object_mut(), patch.as_object()) {
         for (k, val) in p {
             // proxy-affecting fields go through their own commands
-            if matches!(k.as_str(), "port" | "listenAll" | "intercept" | "rules") {
+            if matches!(k.as_str(), "port" | "listenAll" | "intercept" | "rules" | "systemProxyOwned") {
                 continue;
             }
             obj.insert(k.clone(), val.clone());
@@ -712,16 +751,160 @@ async fn set_system_proxy(app: State<'_, App>, on: bool) -> R<system::SystemProx
         (s.port, s.system_proxy_bypass.clone())
     };
     let r = tauri::async_runtime::spawn_blocking(move || system::set_system_proxy(on, port, &bypass)).await.map_err(err)??;
-    app.set_system_proxy.store(on, Ordering::Relaxed);
+    app.own_system_proxy(on);
     Ok(r)
+}
+
+// ---------------------------------------------------------------- startup: logging, splash, theme
+
+/// Log file kept in `<data>/wirecraft/logs`; the previous one is kept as `wirecraft.log.1` once this grows past
+/// LOG_CAP at startup.
+const LOG_CAP: u64 = 5 << 20;
+
+fn init_logging() -> Option<std::path::PathBuf> {
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,wirecraft_core=info"));
+    let dir = wirecraft_core::paths::data_dir().join("logs");
+    let path = dir.join("wirecraft.log");
+    let file = std::fs::create_dir_all(&dir).ok().and_then(|_| {
+        if std::fs::metadata(&path).map(|m| m.len() > LOG_CAP).unwrap_or(false) {
+            let _ = std::fs::rename(&path, dir.join("wirecraft.log.1"));
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()
+    });
+    let registry = tracing_subscriber::registry().with(filter).with(fmt::layer());
+    let logged = file.is_some();
+    match file {
+        Some(f) => registry.with(fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f))).init(),
+        None => registry.init(),
+    }
+    // panics end up in the log file too, not only on a stderr nobody sees
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        default_hook(info);
+    }));
+    logged.then_some(path)
+}
+
+/// "dark" or "light" for the saved theme setting, asking the OS when it is "system".
+fn resolve_theme(setting: &str, window: Option<&tauri::WebviewWindow>) -> &'static str {
+    match setting {
+        "light" => "light",
+        "dark" => "dark",
+        _ => match window.and_then(|w| w.theme().ok()) {
+            Some(tauri::Theme::Light) => "light",
+            _ => "dark",
+        },
+    }
+}
+
+/// `bg/app` from the design tokens, so no frame ever flashes the wrong colour.
+fn backdrop(theme: &str) -> tauri::window::Color {
+    if theme == "light" { tauri::window::Color(0xe9, 0xec, 0xf0, 0xff) } else { tauri::window::Color(0x0a, 0x0c, 0x0f, 0xff) }
+}
+
+/// When the splash appeared, so it stays up long enough to be read rather than flicker.
+static SPLASH_SHOWN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+const SPLASH_MIN: Duration = Duration::from_millis(900);
+/// Show the main window anyway if the interface never reports ready (it then shows its own error).
+const SPLASH_MAX: Duration = Duration::from_secs(12);
+
+fn open_splash(app: &tauri::App, theme: &str) {
+    let init = format!(
+        "window.__WIRECRAFT__ = {{ theme: {theme:?}, version: {:?} }};",
+        env!("CARGO_PKG_VERSION")
+    );
+    let built = tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
+        .title("WireCraft")
+        .inner_size(460.0, 300.0)
+        .resizable(false)
+        .decorations(false)
+        .center()
+        .skip_taskbar(true)
+        .focused(true)
+        .background_color(backdrop(theme))
+        .initialization_script(&init)
+        .build();
+    match built {
+        Ok(_) => {
+            let _ = SPLASH_SHOWN.set(std::time::Instant::now());
+        }
+        Err(e) => tracing::warn!("splash window: {e}"),
+    }
+}
+
+/// Close the splash and bring up the main window. Safe to call more than once.
+fn show_main(app: &AppHandle) {
+    if let Some(s) = app.get_webview_window("splash") {
+        let _ = s.close();
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// The interface finished loading.
+#[tauri::command]
+async fn app_ready(handle: AppHandle) {
+    if let Some(at) = SPLASH_SHOWN.get() {
+        let left = SPLASH_MIN.saturating_sub(at.elapsed());
+        tokio::time::sleep(left).await;
+    }
+    show_main(&handle);
+}
+
+/// The window background follows the theme (the webview paints over it, but resizes and startup show it).
+#[tauri::command]
+fn set_window_theme(window: tauri::WebviewWindow, theme: String) {
+    let _ = window.set_background_color(Some(backdrop(&theme)));
+}
+
+/// Where the log file is, for "Open logs folder".
+#[tauri::command]
+fn log_path() -> String {
+    wirecraft_core::paths::data_dir().join("logs").join("wirecraft.log").display().to_string()
+}
+
+/// Quit on SIGTERM / SIGINT / SIGHUP (logout, `kill`, Ctrl+C in a terminal) the same way as from the window,
+/// so the OS proxy is restored instead of left pointing at a dead port.
+fn spawn_signal_handler(handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut term), Ok(mut int), Ok(mut hup)) =
+                (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup()))
+            else {
+                tracing::warn!("could not install signal handlers");
+                return;
+            };
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+                _ = hup.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+        }
+        tracing::info!("quit signal received");
+        handle.state::<App>().restore_system_proxy();
+        handle.exit(0);
+    });
 }
 
 // ---------------------------------------------------------------- entry point
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,wirecraft_core=info".into()))
-        .init();
+    let log = init_logging();
+    tracing::info!("WireCraft {} starting{}", env!("CARGO_PKG_VERSION"), log.map(|p| format!(", log at {}", p.display())).unwrap_or_default());
 
     let settings = Settings::load();
     let ca_dir = std::env::var("WIRECRAFT_CA_DIR").map(Into::into).unwrap_or_else(|_| wirecraft_core::ca::default_ca_dir());
@@ -734,8 +917,26 @@ pub fn run() {
     };
     let store = Store::new(MAX_FLOWS);
     let rules = settings.rules.clone();
+    let theme_setting = settings.theme.clone();
+    // a previous run that crashed or was killed may have left the OS proxy on: take responsibility for it again
+    let owned = settings.system_proxy_owned;
+    if owned {
+        tracing::warn!("the previous session left the system proxy switched on; it will be switched off on quit");
+    }
 
     let app = tauri::Builder::default()
+        // first, so a second launch only focuses the running window
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| show_main(app)))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&["splash"])
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::VISIBLE
+                        - tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -745,24 +946,51 @@ pub fn run() {
             proxy: RwLock::new(None),
             proxy_error: RwLock::new(None),
             settings: RwLock::new(settings),
-            set_system_proxy: AtomicBool::new(false),
+            set_system_proxy: AtomicBool::new(owned),
             rules: Arc::new(RwLock::new(Arc::new(rules))),
             breaks: Arc::new(wirecraft_core::Breaks::default()),
         })
         .setup(move |app| {
+            let main = app.get_webview_window("main");
+            let theme = resolve_theme(&theme_setting, main.as_ref());
+            if let Some(m) = &main {
+                let _ = m.set_background_color(Some(backdrop(theme)));
+            }
+            open_splash(app, theme);
+
             let handle = app.handle().clone();
             spawn_event_forwarder(handle.clone(), store.clone());
             spawn_stats(handle.clone());
+            spawn_signal_handler(handle.clone());
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(SPLASH_MAX).await;
+                    if handle.get_webview_window("splash").is_some() {
+                        tracing::warn!("the interface did not report ready within {SPLASH_MAX:?}; showing it anyway");
+                        show_main(&handle);
+                    }
+                });
+            }
             tauri::async_runtime::spawn(async move {
-                let st = handle.state::<App>().restart(&handle).await;
+                let state = handle.state::<App>();
+                let st = state.restart(&handle).await;
                 match &st.error {
-                    Some(e) => tracing::error!("{e}"),
+                    Some(e) => {
+                        tracing::error!("{e}");
+                        // never leave every app on the machine pointed at a proxy that isn't there
+                        state.restore_system_proxy();
+                    }
                     None => tracing::info!("proxy on {}", st.addr.unwrap_or_default()),
                 }
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_ready,
+            set_window_theme,
+            log_path,
+
             app_state,
             stats,
             list_flows,
@@ -812,16 +1040,8 @@ pub fn run() {
 
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
-            let st = handle.state::<App>();
-            if st.set_system_proxy.load(Ordering::Relaxed) {
-                let (port, bypass) = {
-                    let s = st.settings.read();
-                    (s.port, s.system_proxy_bypass.clone())
-                };
-                if let Err(e) = system::set_system_proxy(false, port, &bypass) {
-                    tracing::warn!("restoring system proxy: {e}");
-                }
-            }
+            handle.state::<App>().restore_system_proxy();
+            tracing::info!("WireCraft quit");
         }
     });
 }

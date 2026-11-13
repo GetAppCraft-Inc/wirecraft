@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { ICONS, type IconName } from "../lib/icons";
+  import { ICONS } from "../lib/icons";
+  import { EXTRA_ICONS, type IconName } from "../lib/icons-extra";
+  const ALL: Record<string, string> = { ...ICONS, ...EXTRA_ICONS };
   let { name, size = 14, color = "currentColor", weight }: { name: IconName; size?: number; color?: string; weight?: number } = $props();
   const fills = new Set(["play", "record"]);
 </script>
@@ -14,7 +16,7 @@
   stroke-width={(weight ?? (size >= 16 ? 1.6 : 1.4)) * (24 / size)}
   stroke-linecap="round"
   stroke-linejoin="round"
-  aria-hidden="true">{@html ICONS[name]}</svg>
+  aria-hidden="true">{@html ALL[name]}</svg>
 
 <style>
   .icon {

@@ -818,6 +818,11 @@ fn retarget(o: &mut Outgoing, url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The Type column: `classify`, plus GraphQL recognised from the request body when the path doesn't say so.
+fn kind_of(kind: &'static str, o: &Outgoing) -> &'static str {
+    if matches!(kind, "JSON" | "—") && crate::body::looks_like_graphql(o.method.as_str(), &o.body) { "GQL" } else { kind }
+}
+
 fn script_request(o: &Outgoing) -> crate::scripts::ScriptRequest {
     crate::scripts::ScriptRequest {
         method: o.method.to_string(),
@@ -926,7 +931,7 @@ async fn exchange(sh: Arc<Shared>, mut o: Outgoing, on_upgrade: Option<hyper::up
                 http_version: o.version.clone(),
                 status: None,
                 state: FlowState::Pending,
-                kind: classify(o.method.as_str(), &o.path, req_ct.as_deref(), None, is_upgrade).into(),
+                kind: kind_of(classify(o.method.as_str(), &o.path, req_ct.as_deref(), None, is_upgrade), &o).into(),
                 content_type: None,
                 req_size: 0,
                 resp_size: 0,
@@ -1314,7 +1319,7 @@ async fn respond(
             resp_headers.push((":status".into(), status.as_u16().to_string()));
         }
         resp_headers.extend(header_list(&parts.headers));
-        let kind = classify(o.method.as_str(), &o.path, req_ct.as_deref(), resp_ct.as_deref(), upgrade.is_some() && status == StatusCode::SWITCHING_PROTOCOLS);
+        let kind = kind_of(classify(o.method.as_str(), &o.path, req_ct.as_deref(), resp_ct.as_deref(), upgrade.is_some() && status == StatusCode::SWITCHING_PROTOCOLS), &o);
         let rv = version_str(parts.version).to_string();
         sh.store.update(id, |f| {
             f.summary.status = Some(status.as_u16());

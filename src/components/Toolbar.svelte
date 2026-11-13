@@ -4,7 +4,7 @@
   import Kbd from "./Kbd.svelte";
   import Logo from "./Logo.svelte";
   import WindowControls from "./WindowControls.svelte";
-  import type { IconName } from "../lib/icons";
+  import type { IconName } from "../lib/icons-extra";
   import { tools } from "../lib/tools.svelte";
 
   let { compact = false }: { compact?: boolean } = $props();
@@ -20,6 +20,9 @@
     { ic: "diff", label: "Diff", run: () => tools.compare(app.selection()), count: () => 0 },
   ];
 
+  const themeSetting = $derived(app.settings?.theme ?? "system");
+  const themeIcon = $derived(themeSetting === "light" ? "sun" : themeSetting === "dark" ? "moon" : "contrast");
+  const themeLabel = $derived(themeSetting === "light" ? "Light" : themeSetting === "dark" ? "Dark" : "System");
   const running = $derived(app.proxy?.running ?? false);
   const port = $derived(app.proxy?.port ?? app.settings?.port ?? 9090);
 
@@ -67,6 +70,9 @@
   <button class="palette" class:compact onclick={() => (app.palette = true)} title="Command palette (Ctrl+K)">
     <Icon name="command" size={13} color="var(--text-tertiary)" />
     {#if !compact}<span class="trunc ph">Search or run a command…</span><Kbd keys={["Ctrl", "K"]} />{/if}
+  </button>
+  <button class="icon-btn" title="Theme: {themeLabel} (click to switch)" aria-label="Theme: {themeLabel}" onclick={() => app.cycleTheme()}>
+    <Icon name={themeIcon} size={16} />
   </button>
   <button class="icon-btn" title="Setup & settings" onclick={() => { app.onboardingStep = 2; app.screen = "onboarding"; }}><Icon name="settings" size={16} /></button>
   <WindowControls />

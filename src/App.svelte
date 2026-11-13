@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { app } from "./lib/state.svelte";
-  import { errMsg } from "./lib/api";
+  import { api, errMsg } from "./lib/api";
   import { copyFlowAs, exportHar } from "./lib/actions";
   import { SHORTCUTS } from "./lib/commands";
   import Workspace from "./screens/Workspace.svelte";
@@ -25,7 +25,16 @@
   };
 
   onMount(() => {
-    app.init().then(() => tools.init()).catch((e) => (fatal = errMsg(e)));
+    app
+      .init()
+      .then(() => tools.init())
+      .catch((e) => (fatal = errMsg(e)))
+      // close the splash once the first real frame (workspace, onboarding or the error) is ready
+      .finally(() => requestAnimationFrame(() => api.appReady().catch(() => {})));
+    // keep stray promise rejections out of the user's way but visible in devtools
+    const onRejection = (e: PromiseRejectionEvent) => console.error("unhandled rejection:", e.reason);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => window.removeEventListener("unhandledrejection", onRejection);
   });
 
   function typing(e: KeyboardEvent): boolean {

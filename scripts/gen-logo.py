@@ -148,6 +148,8 @@ def main():
     small = os.path.join(OUT, "wirecraft-small.svg")
     open(full, "w").write(svg(True))
     open(small, "w").write(svg(False))
+    # the splash screen (public/splash.html) loads before the app bundle, so it gets its own copy
+    open(os.path.join(ROOT, "public", "icon.svg"), "w").write(svg(True))
     for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
         d = os.path.join(OUT, "hicolor", f"{size}x{size}", "apps")
         os.makedirs(d, exist_ok=True)

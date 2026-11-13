@@ -176,6 +176,28 @@ fn read_all(mut r: impl Read) -> Result<Vec<u8>, String> {
     r.read_to_end(&mut out).map_err(|e| e.to_string())?;
     Ok(out)
 }
+/// A GraphQL request sent as a JSON POST to any path: `{"query": "…", …}` (or a batch of them).
+pub fn looks_like_graphql(method: &str, req_body: &[u8]) -> bool {
+    if !method.eq_ignore_ascii_case("POST") || req_body.len() > 1 << 20 {
+        return false;
+    }
+    let first = req_body.iter().find(|b| !b.is_ascii_whitespace());
+    if !matches!(first, Some(b'{') | Some(b'[')) {
+        return false;
+    }
+    let is_op = |v: &serde_json::Value| {
+        v.get("query").and_then(|q| q.as_str()).is_some_and(|q| {
+            let q = q.trim_start();
+            q.starts_with('{') || q.starts_with("query") || q.starts_with("mutation") || q.starts_with("subscription") || q.starts_with("fragment")
+        }) || v.get("extensions").and_then(|e| e.get("persistedQuery")).is_some()
+    };
+    match serde_json::from_slice::<serde_json::Value>(req_body) {
+        Ok(serde_json::Value::Array(a)) => !a.is_empty() && a.iter().all(is_op),
+        Ok(v) => is_op(&v),
+        Err(_) => false,
+    }
+}
+
 
 /// Short resource type shown in the Type column: JSON, JS, CSS, Img, Media, Font, HTML, XML, GQL, gRPC, WS, Text, Bin, —.
 pub fn classify(method: &str, path: &str, req_ct: Option<&str>, resp_ct: Option<&str>, upgrade: bool) -> &'static str {
@@ -262,5 +284,20 @@ mod tests {
         assert_eq!(hang_up_after_data(Some(5)).await, None);
         assert!(hang_up_after_data(Some(6)).await.is_some());
         assert!(hang_up_after_data(None).await.is_some());
+    }
+}
+
+#[cfg(test)]
+mod gql_tests {
+    use super::looks_like_graphql;
+
+    #[test]
+    fn detects_graphql_posts() {
+        assert!(looks_like_graphql("POST", br#"{"query":"{ country(code: \"NZ\") { name } }"}"#));
+        assert!(looks_like_graphql("POST", br#" [{"query":"query A { a }"},{"query":"mutation B { b }"}]"#));
+        assert!(looks_like_graphql("POST", br#"{"operationName":"X","extensions":{"persistedQuery":{"sha256Hash":"ab"}}}"#));
+        assert!(!looks_like_graphql("GET", br#"{"query":"{ a }"}"#));
+        assert!(!looks_like_graphql("POST", br#"{"query":"select * from users"}"#));
+        assert!(!looks_like_graphql("POST", br#"{"title":"x"}"#));
     }
 }

@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { IconName } from "../lib/icons";
+  import type { IconName } from "../lib/icons-extra";
   export type MenuItem =
     | "-"
     | { header: string }

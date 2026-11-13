@@ -1,6 +1,6 @@
 // App-wide reactive state. Flows live in plain (non-proxied) structures for speed; `version` is bumped to
 // signal changes so derived views recompute.
-import { api, on, errMsg, type AppState, type FlowDetail, type FlowSummary, type Settings, type Stats, type StoreEvent, type ProxyStatus, type TrustEntry } from "./api";
+import { api, on, errMsg, type ThemeSetting, type AppState, type FlowDetail, type FlowSummary, type Settings, type Stats, type StoreEvent, type ProxyStatus, type TrustEntry } from "./api";
 import { bodyNeedles, matches, parse, type MatchCtx } from "./query";
 import { url } from "./format";
 
@@ -419,9 +419,16 @@ class App {
     this.settings = await api.setPrefs({ favourites: fav });
   }
 
-  async setTheme(theme: "dark" | "light") {
+  async setTheme(theme: ThemeSetting) {
     applyTheme(theme);
     this.settings = await api.setPrefs({ theme });
+  }
+
+  /** System → dark → light → system. */
+  cycleTheme() {
+    const order: ThemeSetting[] = ["system", "dark", "light"];
+    const cur = this.settings?.theme ?? "system";
+    this.setTheme(order[(order.indexOf(cur) + 1) % order.length]);
   }
 
   async replay(id: number) {
@@ -459,8 +466,24 @@ class App {
   }
 }
 
-export function applyTheme(t: string) {
-  document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+// ---- theme: "system" follows the OS and keeps following it while the app runs
+const darkQuery = typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+let themeSetting: string = "system";
+
+export function resolvedTheme(setting: string = themeSetting): "dark" | "light" {
+  if (setting === "light" || setting === "dark") return setting;
+  return darkQuery && !darkQuery.matches ? "light" : "dark";
 }
+
+export function applyTheme(setting: string) {
+  themeSetting = setting;
+  const t = resolvedTheme(setting);
+  document.documentElement.dataset.theme = t;
+  api.setWindowTheme(t).catch(() => {});
+}
+
+darkQuery?.addEventListener("change", () => {
+  if (themeSetting === "system") applyTheme("system");
+});
 
 export const app = new App();

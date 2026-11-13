@@ -241,10 +241,12 @@ export interface Settings {
   intercept: InterceptConfig;
   onboarded: boolean;
   systemProxyBypass: string;
-  theme: "dark" | "light";
+  theme: ThemeSetting;
   favourites: string[];
   rules: Rules;
 }
+
+export type ThemeSetting = "system" | "dark" | "light";
 
 export interface ProxyStatus {
   running: boolean;
@@ -313,6 +315,9 @@ export interface PortCheck {
 
 export const api = {
   appState: () => invoke<AppState>("app_state"),
+  appReady: () => invoke<void>("app_ready"),
+  setWindowTheme: (theme: "dark" | "light") => invoke<void>("set_window_theme", { theme }),
+  logPath: () => invoke<string>("log_path"),
   stats: () => invoke<Stats>("stats"),
   listFlows: () => invoke<FlowSummary[]>("list_flows"),
   flowDetail: (id: number) => invoke<FlowDetail>("flow_detail", { id }),
